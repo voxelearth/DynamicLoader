@@ -6,3 +6,4 @@
 
 ## Installation
 - Drop the jar into Velocity plugins folder
+- Copy contents of `velocity-server-folder-items` next to Velocity jar

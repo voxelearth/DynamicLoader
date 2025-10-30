@@ -11,7 +11,7 @@
 .mtj.tmp/
 
 # Package Files #
-*.jar
+# *.jar
 *.war
 *.nar
 *.ear
@@ -38,3 +38,4 @@ run/
 
 .idea/
 /velocity
+/gradle

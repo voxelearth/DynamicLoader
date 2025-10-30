@@ -137,6 +137,7 @@ LOBBY_ZIP="$ROOT_DIR/velocity-server-folder-items/lobby.zip"
 FORWARD_SECRET="$ROOT_DIR/velocity-server-folder-items/forwarding.secret"
 SPAWN_SCRIPT="$ROOT_DIR/velocity-server-folder-items/spawn_server.py"
 VELOCITY_TOML="$ROOT_DIR/velocity-server-folder-items/velocity.toml"
+PROTOCOLIZE_JAR="$ROOT_DIR/velocity-server-folder-items/protocolize-velocity.jar"
 
 echo "[*] Setting up Velocity + Voxelearth server..."
 mkdir -p "$VELOCITY_DIR" "$SERVER_DIR"
@@ -226,6 +227,9 @@ fi
 echo "[*] Copying DynamicLoader jar to Velocity plugins..."
 mkdir -p "$VELOCITY_DIR/plugins"
 cp "$DYNAMIC_LOADER_JAR_PATH" "$VELOCITY_DIR/plugins/"
+
+echo "[*] Copying Protocolize jar to Velocity plugins..."
+cp "$PROTOCOLIZE_JAR" "$VELOCITY_DIR/plugins/"
 
 # --- Ensure Windows has Java ---
 echo "[*] Checking if Java exists on Windows PATH..."

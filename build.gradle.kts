@@ -7,11 +7,14 @@ plugins {
 
 repositories {
     maven("https://repo.papermc.io/repository/maven-public/")
+    maven("https://mvn.exceptionflug.de/repository/exceptionflug-public/")
 }
 
 dependencies {
     compileOnly(libs.velocity)
     annotationProcessor(libs.velocity)
+    compileOnly("dev.simplix:protocolize-api:2.4.3")
+    compileOnly("dev.simplix:protocolize-data-bundle:2.4.3") // ItemType + InventoryType live here
 }
 
 tasks {

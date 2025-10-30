@@ -56,7 +56,7 @@ public class DynamicLoader {
     private final Map<UUID, Integer> moveRadius  = new ConcurrentHashMap<>();
     private static final int DEFAULT_RADIUS = 256;
     private static final int RADIUS_STEP    = 50;
-    private static final int RADIUS_MIN     = 64;
+    private static final int RADIUS_MIN     = 50;
     private static final int RADIUS_MAX     = 1024;
 
     private final ExecutorService executor = Executors.newCachedThreadPool();
@@ -77,6 +77,13 @@ public class DynamicLoader {
         proxy.getCommandManager().register("lobby", new LobbyCommand());
         proxy.getCommandManager().register("party", new PartyCommand());
         proxy.getCommandManager().register("help", new HelpCommand()); // override help
+    proxy.getCommandManager().register("visit", new VisitCommand());
+    proxy.getCommandManager().register("visitradius", new VisitRadiusCommand());
+    proxy.getCommandManager().register("visitradiusother", new VisitRadiusOtherCommand());
+    proxy.getCommandManager().register("moveradius", new MoveRadiusCommand());
+    proxy.getCommandManager().register("moveradiusother", new MoveRadiusOtherCommand());
+    proxy.getCommandManager().register("moveload", new MoveLoadCommand());
+    proxy.getCommandManager().register("moveloadother", new MoveLoadOtherCommand());
     }
 
     /** Initialize Protocolize-driven UI after the proxy + dependencies are ready. */
@@ -86,9 +93,8 @@ public class DynamicLoader {
             logger.error("Protocolize not found. Install protocolize-velocity (2.4.x) into the /plugins folder.");
             return;
         }
-        this.nav = new NavigatorUI(
-                proxy,
-                List.of(
+    this.nav = new NavigatorUI(
+        List.of(
             new FamousPlace("Great Pyramids of Giza (Egypt)",      "great pyramids of giza egypt"),
             new FamousPlace("Eiffel Tower (Paris, France)",         "eiffel tower paris"),
             new FamousPlace("Statue of Liberty (NYC, USA)",         "statue of liberty new york"),
@@ -105,7 +111,7 @@ public class DynamicLoader {
             new FamousPlace("Big Ben (London, UK)",                 "big ben london"),
             new FamousPlace("Niagara Falls (USA/Canada)",           "niagara falls"),
             new FamousPlace("Santorini – Oia (Greece)",             "oia santorini"),
-            new FamousPlace("Petra (Jordan)",                       "petra jordan"),
+            new FamousPlace("Custom",                               ""),
             new FamousPlace("Angkor Wat (Siem Reap, Cambodia)",     "angkor wat siem reap")
                 ),
                 new NavigatorUI.Callback() {
@@ -159,7 +165,7 @@ public class DynamicLoader {
             p.sendMessage(Component.text("• /party — create, invite, accept, leave, disband", NamedTextColor.GREEN));
             p.sendMessage(Component.text("• /lobby — return to the main lobby", NamedTextColor.GREEN));
             p.sendMessage(Component.text("Inside your Earth server:", NamedTextColor.AQUA));
-            p.sendMessage(Component.text("• /visit <place>  • /visitradius <x,y>  • /moveload on|off  • /moveradius <x,y>", NamedTextColor.GRAY));
+            p.sendMessage(Component.text("• /visit <address>  • /visitradius <value>  • /moveload on|off  • /moveradius <value>", NamedTextColor.GRAY));
         }
     }
 
@@ -170,7 +176,7 @@ public class DynamicLoader {
             if (!(invocation.source() instanceof Player player)) return;
             UUID playerId = player.getUniqueId();
 
-            UUID leader = parties.isLeader(playerId) ? playerId : parties.leaderOf(playerId);
+            UUID leader = leaderFor(playerId);
             Party party = parties.getPartyOf(playerId).orElseGet(() -> parties.createOrGetParty(playerId));
 
             ServerSession existing = sessionsByLeader.get(leader);
@@ -300,11 +306,115 @@ public class DynamicLoader {
         }
     }
 
+    private class VisitCommand implements SimpleCommand {
+        @Override
+        public void execute(Invocation in) {
+            if (!(in.source() instanceof Player player)) return;
+            String[] args = in.arguments();
+            if (args.length == 0) {
+                player.sendMessage(Component.text("Usage: /visit <address>", NamedTextColor.RED));
+                return;
+            }
+            handleVisitRequest(player, String.join(" ", args));
+        }
+    }
+
+    private class VisitRadiusCommand implements SimpleCommand {
+        @Override
+        public void execute(Invocation in) {
+            if (!(in.source() instanceof Player player)) return;
+            String[] args = in.arguments();
+            if (args.length == 0) {
+                player.sendMessage(Component.text("Usage: /visitradius <value>", NamedTextColor.RED));
+                return;
+            }
+            try {
+                int value = Integer.parseInt(args[0]);
+                handleVisitRadiusCommand(player, value);
+            } catch (NumberFormatException ex) {
+                player.sendMessage(Component.text("Radius must be a whole number.", NamedTextColor.RED));
+            }
+        }
+    }
+
+    private class VisitRadiusOtherCommand implements SimpleCommand {
+        @Override
+        public void execute(Invocation in) {
+            if (!(in.source() instanceof Player player)) return;
+            String[] args = in.arguments();
+            if (args.length < 2) {
+                player.sendMessage(Component.text("Usage: /visitradiusother <player> <value>", NamedTextColor.RED));
+                return;
+            }
+            forwardPlayerCommand(player, leaderFor(player.getUniqueId()), "visitradiusother", args);
+        }
+    }
+
+    private class MoveRadiusCommand implements SimpleCommand {
+        @Override
+        public void execute(Invocation in) {
+            if (!(in.source() instanceof Player player)) return;
+            String[] args = in.arguments();
+            if (args.length == 0) {
+                player.sendMessage(Component.text("Usage: /moveradius <value>", NamedTextColor.RED));
+                return;
+            }
+            try {
+                int value = Integer.parseInt(args[0]);
+                handleMoveRadiusCommand(player, value);
+            } catch (NumberFormatException ex) {
+                player.sendMessage(Component.text("Radius must be a whole number.", NamedTextColor.RED));
+            }
+        }
+    }
+
+    private class MoveRadiusOtherCommand implements SimpleCommand {
+        @Override
+        public void execute(Invocation in) {
+            if (!(in.source() instanceof Player player)) return;
+            String[] args = in.arguments();
+            if (args.length < 2) {
+                player.sendMessage(Component.text("Usage: /moveradiusother <player> <value>", NamedTextColor.RED));
+                return;
+            }
+            forwardPlayerCommand(player, leaderFor(player.getUniqueId()), "moveradiusother", args);
+        }
+    }
+
+    private class MoveLoadCommand implements SimpleCommand {
+        @Override
+        public void execute(Invocation in) {
+            if (!(in.source() instanceof Player player)) return;
+            String[] args = in.arguments();
+            handleMoveLoadCommand(player, args);
+        }
+    }
+
+    private class MoveLoadOtherCommand implements SimpleCommand {
+        @Override
+        public void execute(Invocation in) {
+            if (!(in.source() instanceof Player player)) return;
+            String[] args = in.arguments();
+            if (args.length < 2) {
+                player.sendMessage(Component.text("Usage: /moveloadother <player> <on|off|toggle>", NamedTextColor.RED));
+                return;
+            }
+            forwardPlayerCommand(player, leaderFor(player.getUniqueId()), "moveloadother", args);
+        }
+    }
+
     /* ========= GUI callbacks ========= */
 
     private void handleVisitRequest(Player player, String visitArg) {
         UUID playerId = player.getUniqueId();
-        UUID leader = parties.isLeader(playerId) ? playerId : parties.leaderOf(playerId);
+    UUID leader = leaderFor(playerId);
+
+        if (visitArg == null || visitArg.isBlank()) {
+            player.sendMessage(Component.text("Use ", NamedTextColor.GRAY)
+                    .append(Component.text("/visit <address>", NamedTextColor.GREEN))
+                    .append(Component.text(" to jump to any location.", NamedTextColor.GRAY)));
+            return;
+        }
 
         ServerSession session = sessionsByLeader.get(leader);
         if (session == null) {
@@ -354,57 +464,102 @@ public class DynamicLoader {
     }
 
     private void handleSettingsAction(Player player, SettingsAction action) {
-        UUID leader = parties.isLeader(player.getUniqueId()) ? player.getUniqueId() : parties.leaderOf(player.getUniqueId());
-        ServerSession session = sessionsByLeader.get(leader);
-        if (session == null) {
-            player.sendMessage(Component.text("Start your world with /earth first.", NamedTextColor.YELLOW));
-            return;
-        }
-
-        String consoleCmd = null, playerCmd = null;
+        UUID leader = leaderFor(player.getUniqueId());
 
         switch (action) {
             case VISIT_RADIUS_MINUS -> {
                 int v = clamp(visitRadius.getOrDefault(leader, DEFAULT_RADIUS) - RADIUS_STEP);
-                visitRadius.put(leader, v);
-                consoleCmd = "execute as " + player.getUsername() + " run visitradius " + v + "," + v;
-                playerCmd  = "visitradius " + v + "," + v;
-                player.sendActionBar(Component.text("Visit radius set to " + v + "x" + v, NamedTextColor.AQUA));
+                if (forwardPlayerCommand(player, leader, "visitradius", String.valueOf(v))) {
+                    visitRadius.put(leader, v);
+                    player.sendActionBar(Component.text("Visit radius set to " + v + " blocks", NamedTextColor.AQUA));
+                }
             }
             case VISIT_RADIUS_PLUS -> {
                 int v = clamp(visitRadius.getOrDefault(leader, DEFAULT_RADIUS) + RADIUS_STEP);
-                visitRadius.put(leader, v);
-                consoleCmd = "execute as " + player.getUsername() + " run visitradius " + v + "," + v;
-                playerCmd  = "visitradius " + v + "," + v;
-                player.sendActionBar(Component.text("Visit radius set to " + v + "x" + v, NamedTextColor.AQUA));
+                if (forwardPlayerCommand(player, leader, "visitradius", String.valueOf(v))) {
+                    visitRadius.put(leader, v);
+                    player.sendActionBar(Component.text("Visit radius set to " + v + " blocks", NamedTextColor.AQUA));
+                }
             }
-            case MOVELOAD_TOGGLE -> {
-                consoleCmd = "execute as " + player.getUsername() + " run moveload toggle";
-                playerCmd  = "moveload toggle";
-            }
+            case MOVELOAD_TOGGLE -> forwardPlayerCommand(player, leader, "moveload", "toggle");
             case MOVE_RADIUS_MINUS -> {
                 int v = clamp(moveRadius.getOrDefault(leader, DEFAULT_RADIUS) - RADIUS_STEP);
-                moveRadius.put(leader, v);
-                consoleCmd = "execute as " + player.getUsername() + " run moveradius " + v + "," + v;
-                playerCmd  = "moveradius " + v + "," + v;
-                player.sendActionBar(Component.text("Move radius set to " + v + "x" + v, NamedTextColor.AQUA));
+                if (forwardPlayerCommand(player, leader, "moveradius", String.valueOf(v))) {
+                    moveRadius.put(leader, v);
+                    player.sendActionBar(Component.text("Move radius set to " + v + " blocks", NamedTextColor.AQUA));
+                }
             }
             case MOVE_RADIUS_PLUS -> {
                 int v = clamp(moveRadius.getOrDefault(leader, DEFAULT_RADIUS) + RADIUS_STEP);
-                moveRadius.put(leader, v);
-                consoleCmd = "execute as " + player.getUsername() + " run moveradius " + v + "," + v;
-                playerCmd  = "moveradius " + v + "," + v;
-                player.sendActionBar(Component.text("Move radius set to " + v + "x" + v, NamedTextColor.AQUA));
+                if (forwardPlayerCommand(player, leader, "moveradius", String.valueOf(v))) {
+                    moveRadius.put(leader, v);
+                    player.sendActionBar(Component.text("Move radius set to " + v + " blocks", NamedTextColor.AQUA));
+                }
             }
             default -> {}
         }
+    }
 
-        if (consoleCmd != null) {
-            if (!isOnSessionServer(player, session)) {
-                connectToExistingServer(player, session);
-            }
-            scheduleBackendCommandAfterConnect(player, session, consoleCmd, playerCmd);
+    private void handleVisitRadiusCommand(Player player, int desired) {
+        UUID leader = leaderFor(player.getUniqueId());
+        int value = clamp(desired);
+        if (forwardPlayerCommand(player, leader, "visitradius", String.valueOf(value))) {
+            visitRadius.put(leader, value);
+            player.sendActionBar(Component.text("Visit radius set to " + value + " blocks", NamedTextColor.AQUA));
         }
+    }
+
+    private void handleMoveRadiusCommand(Player player, int desired) {
+        UUID leader = leaderFor(player.getUniqueId());
+        int value = clamp(desired);
+        if (forwardPlayerCommand(player, leader, "moveradius", String.valueOf(value))) {
+            moveRadius.put(leader, value);
+            player.sendActionBar(Component.text("Move radius set to " + value + " blocks", NamedTextColor.AQUA));
+        }
+    }
+
+    private void handleMoveLoadCommand(Player player, String[] args) {
+        UUID leader = leaderFor(player.getUniqueId());
+        String[] payload = (args == null || args.length == 0) ? new String[]{"toggle"} : args;
+        forwardPlayerCommand(player, leader, "moveload", payload);
+    }
+
+    private UUID leaderFor(UUID playerId) {
+        return parties.leaderOf(playerId);
+    }
+
+    private boolean forwardPlayerCommand(Player player, UUID leader, String label, String... args) {
+        String playerCommand = label;
+        if (args != null && args.length > 0) {
+            playerCommand += " " + String.join(" ", args);
+        }
+        String consoleCommand = "execute as " + player.getUsername() + " run " + playerCommand;
+        return forwardCommandToSession(player, leader, consoleCommand, playerCommand);
+    }
+
+    private boolean forwardCommandToSession(Player player, UUID leader, String consoleCommand, String playerCommand) {
+        UUID resolvedLeader = leader != null ? leader : player.getUniqueId();
+        ServerSession session = sessionsByLeader.get(resolvedLeader);
+        if (session == null) {
+            player.sendMessage(Component.text("Start your world with /earth first.", NamedTextColor.YELLOW));
+            return false;
+        }
+
+        session.members.add(player.getUniqueId());
+
+        boolean alreadyThere = isOnSessionServer(player, session);
+        if (!alreadyThere) {
+            connectToExistingServer(player, session);
+            if (session.connecting) {
+                executor.submit(() -> {
+                    try { Thread.sleep(5000); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+                    connectToExistingServer(player, session);
+                });
+            }
+        }
+
+        scheduleBackendCommandAfterConnect(player, session, consoleCommand, playerCommand);
+        return true;
     }
 
     private int clamp(int v) { return Math.max(RADIUS_MIN, Math.min(RADIUS_MAX, v)); }
@@ -672,7 +827,7 @@ public class DynamicLoader {
                             .append(Component.newline())
                             .append(Component.text("• Right-click the Nether Star in slot 9 to open the Navigator.", NamedTextColor.GRAY)).append(Component.newline())
                             .append(Component.text("• Commands you can use here: ", NamedTextColor.GRAY))
-                            .append(Component.text("/visit, /visitradius, /moveload, /moveradius", NamedTextColor.GREEN)).append(Component.newline())
+                            .append(Component.text("/visit <address>, /visitradius <value>, /moveload, /moveradius <value>", NamedTextColor.GREEN)).append(Component.newline())
                             .append(Component.text("• Use ", NamedTextColor.GRAY))
                             .append(Component.text("/lobby ", NamedTextColor.GREEN))
                             .append(Component.text("to return to the main lobby at any time.", NamedTextColor.GRAY))

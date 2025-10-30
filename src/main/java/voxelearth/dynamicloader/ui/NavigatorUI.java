@@ -1,7 +1,6 @@
 package voxelearth.dynamicloader.ui;
 
 import com.velocitypowered.api.proxy.Player;
-import com.velocitypowered.api.proxy.ProxyServer;
 import dev.simplix.protocolize.api.Protocolize;
 import dev.simplix.protocolize.api.chat.ChatElement;
 import dev.simplix.protocolize.api.inventory.Inventory;
@@ -38,7 +37,6 @@ public final class NavigatorUI {
     private static final int NAV_HOTBAR_INDEX = 8;                    // 0..8
     private static final int NAV_MC_SLOT_ID   = 36 + NAV_HOTBAR_INDEX; // 44 (slot 9)
 
-    private final ProxyServer proxy;
     private final List<FamousPlace> places;
     private final Callback cb;
 
@@ -49,8 +47,7 @@ public final class NavigatorUI {
         return t;
     });
 
-    public NavigatorUI(ProxyServer proxy, List<FamousPlace> places, Callback cb) {
-        this.proxy  = proxy;
+    public NavigatorUI(List<FamousPlace> places, Callback cb) {
         this.places = places;
         this.cb     = cb;
     }
@@ -134,26 +131,44 @@ public final class NavigatorUI {
     }
 
     private void openPlaces(ProtocolizePlayer pp) {
-        int rows = Math.max(1, Math.min(3, (int)Math.ceil(places.size()/9.0)));
-        InventoryType type = rows == 1 ? InventoryType.GENERIC_9X1 :
-                             rows == 2 ? InventoryType.GENERIC_9X2 : InventoryType.GENERIC_9X3;
+        final int BACK_SLOT = 22;
+        final int MAX_SLOTS = 27;
 
-        Inventory inv = new Inventory(type);
+        Inventory inv = new Inventory(InventoryType.GENERIC_9X3);
         inv.title(ChatElement.ofLegacyText("Voxel Earth • Famous Places"));
 
-        for (int i = 0; i < places.size() && i < rows*9; i++) {
-            ItemType icon = iconFor(places.get(i).name());
-            inv.item(i, named(icon, "§f" + places.get(i).name()));
+        Map<Integer, FamousPlace> slotToPlace = new HashMap<>();
+        int slot = 0;
+        for (FamousPlace place : places) {
+            if (slot >= MAX_SLOTS) {
+                break;
+            }
+            if (slot == BACK_SLOT) {
+                slot++;
+            }
+            if (slot >= MAX_SLOTS) {
+                break;
+            }
+
+            ItemType icon = iconFor(place.name());
+            String displayName = (place.visitArg() == null || place.visitArg().isBlank())
+                    ? "§fCustom (use /visit <address>)"
+                    : "§f" + place.name();
+            inv.item(slot, named(icon, displayName));
+            slotToPlace.put(slot, place);
+            slot++;
         }
-        // Back button
-        inv.item(rows*9 - 1, named(ItemType.ARROW, "§7Back"));
+
+        // Back button consistent with other menus
+        inv.item(BACK_SLOT, named(ItemType.ARROW, "§7Back"));
 
         inv.onClick(click -> {
             try { click.cancelled(true); } catch (Throwable ignored) {}
-            int slot = click.slot();
-            if (slot == rows*9 - 1) { openMain(pp); return; }
-            if (slot >= 0 && slot < places.size()) {
-                cb.onPlaceChosen(pp.uniqueId(), places.get(slot));
+            int clicked = click.slot();
+            if (clicked == BACK_SLOT) { openMain(pp); return; }
+            FamousPlace place = slotToPlace.get(clicked);
+            if (place != null) {
+                cb.onPlaceChosen(pp.uniqueId(), place);
                 pp.closeInventory();
             }
         });
@@ -208,7 +223,8 @@ public final class NavigatorUI {
         if (n.contains("big ben") || n.contains("westminster")) return ItemType.CLOCK;
         if (n.contains("niagara")) return ItemType.WATER_BUCKET;
         if (n.contains("santorini") || n.contains("oia")) return ItemType.BLUE_WOOL;
-        if (n.contains("petra")) return ItemType.RED_SANDSTONE;
+    if (n.contains("custom")) return ItemType.BOOK;
+    if (n.contains("petra")) return ItemType.RED_SANDSTONE;
         if (n.contains("angkor")) return ItemType.COBBLESTONE;
         return ItemType.MAP;
     }

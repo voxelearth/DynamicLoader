@@ -6,6 +6,7 @@ import com.velocitypowered.api.event.Subscribe;
 import com.velocitypowered.api.event.connection.DisconnectEvent;
 import com.velocitypowered.api.event.player.ServerConnectedEvent;
 import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
+import com.velocitypowered.api.event.proxy.ProxyShutdownEvent;
 import com.velocitypowered.api.plugin.Dependency;
 import com.velocitypowered.api.plugin.Plugin;
 import com.velocitypowered.api.proxy.Player;
@@ -15,6 +16,7 @@ import com.velocitypowered.api.proxy.server.ServerInfo;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.logger.slf4j.ComponentLogger;
+import net.kyori.adventure.text.event.ClickEvent;
 import voxelearth.dynamicloader.PartyManager.Party;
 import voxelearth.dynamicloader.net.RconClient;
 import voxelearth.dynamicloader.ui.NavigatorUI;
@@ -23,8 +25,10 @@ import voxelearth.dynamicloader.ui.NavigatorUI.PartyAction;
 import voxelearth.dynamicloader.ui.NavigatorUI.SettingsAction;
 
 import java.io.File;
+import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.file.*;
+import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
 
@@ -64,6 +68,13 @@ public class DynamicLoader {
 
     private final PartyManager parties;
     private final Set<String> platformInitialized = ConcurrentHashMap.newKeySet();
+    private final Deque<ServerSession> warmPool = new ConcurrentLinkedDeque<>();
+    private final ScheduledExecutorService warmKeeper = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "DynamicLoader-warm");
+        t.setDaemon(true);
+        return t;
+    });
+    private static final int WARM_BUFFER = 2;
 
     private NavigatorUI nav;
 
@@ -77,13 +88,13 @@ public class DynamicLoader {
         proxy.getCommandManager().register("lobby", new LobbyCommand());
         proxy.getCommandManager().register("party", new PartyCommand());
         proxy.getCommandManager().register("help", new HelpCommand()); // override help
-    proxy.getCommandManager().register("visit", new VisitCommand());
-    proxy.getCommandManager().register("visitradius", new VisitRadiusCommand());
-    proxy.getCommandManager().register("visitradiusother", new VisitRadiusOtherCommand());
-    proxy.getCommandManager().register("moveradius", new MoveRadiusCommand());
-    proxy.getCommandManager().register("moveradiusother", new MoveRadiusOtherCommand());
-    proxy.getCommandManager().register("moveload", new MoveLoadCommand());
-    proxy.getCommandManager().register("moveloadother", new MoveLoadOtherCommand());
+        proxy.getCommandManager().register("visit", new VisitCommand());
+        proxy.getCommandManager().register("visitradius", new VisitRadiusCommand());
+        proxy.getCommandManager().register("visitradiusother", new VisitRadiusOtherCommand());
+        proxy.getCommandManager().register("moveradius", new MoveRadiusCommand());
+        proxy.getCommandManager().register("moveradiusother", new MoveRadiusOtherCommand());
+        proxy.getCommandManager().register("moveload", new MoveLoadCommand());
+        proxy.getCommandManager().register("moveloadother", new MoveLoadOtherCommand());
     }
 
     /** Initialize Protocolize-driven UI after the proxy + dependencies are ready. */
@@ -93,36 +104,38 @@ public class DynamicLoader {
             logger.error("Protocolize not found. Install protocolize-velocity (2.4.x) into the /plugins folder.");
             return;
         }
-    this.nav = new NavigatorUI(
-        List.of(
-            new FamousPlace("Great Pyramids of Giza (Egypt)",      "great pyramids of giza egypt"),
-            new FamousPlace("Eiffel Tower (Paris, France)",         "eiffel tower paris"),
-            new FamousPlace("Statue of Liberty (NYC, USA)",         "statue of liberty new york"),
-            new FamousPlace("Taj Mahal (Agra, India)",              "taj mahal agra"),
-            new FamousPlace("Sydney Opera House (Australia)",       "sydney opera house"),
-            new FamousPlace("Christ the Redeemer (Rio, Brazil)",    "christ the redeemer rio de janeiro"),
-            new FamousPlace("Mount Everest Base Camp (Nepal)",      "everest base camp nepal"),
-            new FamousPlace("Grand Canyon South Rim (USA)",         "grand canyon south rim"),
-            new FamousPlace("Great Wall (Mutianyu, China)",         "great wall mutianyu"),
-            new FamousPlace("Colosseum (Rome, Italy)",              "colosseum rome"),
-            new FamousPlace("Machu Picchu (Peru)",                  "machu picchu"),
-            new FamousPlace("Burj Khalifa (Dubai, UAE)",            "burj khalifa dubai"),
-            new FamousPlace("Golden Gate Bridge (San Francisco)",   "golden gate bridge san francisco"),
-            new FamousPlace("Big Ben (London, UK)",                 "big ben london"),
-            new FamousPlace("Niagara Falls (USA/Canada)",           "niagara falls"),
-            new FamousPlace("Santorini – Oia (Greece)",             "oia santorini"),
-            new FamousPlace("Custom",                               ""),
-            new FamousPlace("Angkor Wat (Siem Reap, Cambodia)",     "angkor wat siem reap")
+        this.nav = new NavigatorUI(
+                List.of(
+                        new FamousPlace("Great Pyramids of Giza, Egypt",        "great pyramids of giza egypt"),
+                        new FamousPlace("Eiffel Tower, Paris France",           "eiffel tower paris"),
+                        new FamousPlace("Statue of Liberty, NYC USA",           "statue of liberty new york"),
+                        new FamousPlace("Taj Mahal, Agra India",                "taj mahal agra"),
+                        new FamousPlace("Sydney Opera House, Australia",        "sydney opera house"),
+                        new FamousPlace("Christ the Redeemer, Rio Brazil",      "christ the redeemer rio de janeiro"),
+                        new FamousPlace("Mount Everest Base Camp, Nepal",       "everest base camp nepal"),
+                        new FamousPlace("Grand Canyon South Rim, USA",          "grand canyon south rim"),
+                        new FamousPlace("Great Wall Mutianyu, China",           "great wall mutianyu"),
+                        new FamousPlace("Colosseum, Rome Italy",                "colosseum rome"),
+                        new FamousPlace("Machu Picchu, Peru",                   "machu picchu"),
+                        new FamousPlace("Burj Khalifa, Dubai UAE",              "burj khalifa dubai"),
+                        new FamousPlace("Golden Gate Bridge, San Francisco",    "golden gate bridge san francisco"),
+                        new FamousPlace("Big Ben, London UK",                   "big ben london"),
+                        new FamousPlace("Niagara Falls, USA Canada",            "niagara falls"),
+                        new FamousPlace("Santorini - Oia, Greece",              "oia santorini"),
+                        new FamousPlace("Custom",                               ""),
+                        new FamousPlace("Angkor Wat, Siem Reap Cambodia",       "angkor wat siem reap")
                 ),
                 new NavigatorUI.Callback() {
                     @Override
                     public void onPlaceChosen(UUID playerId, FamousPlace place) {
                         proxy.getPlayer(playerId).ifPresent(p -> handleVisitRequest(p, place.visitArg()));
                     }
+
                     @Override
                     public void onSettingsAction(UUID playerId, SettingsAction action) {
                         proxy.getPlayer(playerId).ifPresent(p -> handleSettingsAction(p, action));
                     }
+
                     @Override
                     public void onPartyAction(UUID playerId, PartyAction action) {
                         proxy.getPlayer(playerId).ifPresent(p -> handlePartyAction(p, action));
@@ -131,6 +144,20 @@ public class DynamicLoader {
         );
         this.nav.installHooks(); // register onConstruct/onInteract
         logger.info("Navigator UI initialized.");
+
+        warmKeeper.scheduleAtFixedRate(() -> {
+            try {
+                int target = Math.min(8, proxy.getAllPlayers().size() + WARM_BUFFER);
+                while (warmPool.size() < target) {
+                    warmPool.add(spawnWarm());
+                }
+                while (warmPool.size() > target) {
+                    shutdownWarm(warmPool.pollLast());
+                }
+            } catch (Throwable t) {
+                logger.warn("Warm pool upkeep failed", t);
+            }
+        }, 0, 10, TimeUnit.SECONDS);
     }
 
     private boolean protocolizeAvailable() {
@@ -178,6 +205,7 @@ public class DynamicLoader {
 
             UUID leader = leaderFor(playerId);
             Party party = parties.getPartyOf(playerId).orElseGet(() -> parties.createOrGetParty(playerId));
+            Collection<UUID> members = new ArrayList<>(party.members);
 
             ServerSession existing = sessionsByLeader.get(leader);
             if (existing != null) {
@@ -188,6 +216,18 @@ public class DynamicLoader {
 
             if (!leader.equals(playerId)) {
                 player.sendMessage(Component.text("Only the party leader can start the world. Ask them to run /earth.", NamedTextColor.RED));
+                return;
+            }
+
+            ServerSession warm = adoptWarmSession(leader, members);
+            if (warm != null) {
+                player.sendMessage(Component.text("🌍 Connecting you to your personal Earth...", NamedTextColor.AQUA));
+                logger.info("[Session] Adopting warm server {} for leader {}", warm.name, leader);
+                executor.submit(() -> {
+                    if (connectLeader(player, warm, true)) {
+                        pullPartyMembers(warm);
+                    }
+                });
                 return;
             }
 
@@ -205,16 +245,17 @@ public class DynamicLoader {
             session.info = new ServerInfo(name, new InetSocketAddress("127.0.0.1", port));
             session.connecting = true;
             session.leader = leader;
-            session.members.addAll(party.members);
+            session.members.addAll(members);
 
             sessionsByLeader.put(leader, session);
-            for (UUID m : party.members) leaderOfMember.put(m, leader);
+            for (UUID m : members) leaderOfMember.put(m, leader);
 
             // initialize default settings for this leader
             visitRadius.putIfAbsent(leader, DEFAULT_RADIUS);
             moveRadius.putIfAbsent(leader,  DEFAULT_RADIUS);
 
             player.sendMessage(Component.text("🌍 Preparing your personal Earth...", NamedTextColor.AQUA));
+            logger.info("[Session] Spawning dedicated server {} for leader {} (port {}, RCON {})", name, leader, port, rconPort);
             executor.submit(() -> spawnAndConnectLeaderThenParty(player, session));
         }
     }
@@ -407,7 +448,7 @@ public class DynamicLoader {
 
     private void handleVisitRequest(Player player, String visitArg) {
         UUID playerId = player.getUniqueId();
-    UUID leader = leaderFor(playerId);
+        UUID leader = leaderFor(playerId);
 
         if (visitArg == null || visitArg.isBlank()) {
             player.sendMessage(Component.text("Use ", NamedTextColor.GRAY)
@@ -416,10 +457,34 @@ public class DynamicLoader {
             return;
         }
 
+        String cleanedVisit = sanitizeVisitInput(visitArg);
+        if (cleanedVisit.isBlank()) {
+            player.sendMessage(Component.text("That address looks invalid. Use letters and numbers only.", NamedTextColor.RED));
+            return;
+        }
+        String playerCmd = sanitizeForSpoof("visit " + cleanedVisit);
+        if (playerCmd.isBlank()) {
+            player.sendMessage(Component.text("That address looks invalid. Use letters and numbers only.", NamedTextColor.RED));
+            return;
+        }
+
         ServerSession session = sessionsByLeader.get(leader);
         if (session == null) {
             if (!leader.equals(playerId)) {
                 player.sendMessage(Component.text("Ask your party leader to start the world with /earth.", NamedTextColor.RED));
+                return;
+            }
+            Collection<UUID> members = partyMembersFor(leader);
+            ServerSession warm = adoptWarmSession(leader, members);
+            if (warm != null) {
+                player.sendMessage(Component.text("🌍 Connecting you to your personal Earth...", NamedTextColor.AQUA));
+                logger.info("[Session] Adopting warm server {} for /visit leader {}", warm.name, leader);
+                executor.submit(() -> {
+                    if (connectLeader(player, warm, false)) {
+                        scheduleBackendCommandAfterConnect(player, warm, playerCmd);
+                        pullPartyMembers(warm);
+                    }
+                });
                 return;
             }
             String name = "voxelearth-" + leader.toString().substring(0, 8);
@@ -436,30 +501,25 @@ public class DynamicLoader {
             session.info = new ServerInfo(name, new InetSocketAddress("127.0.0.1", port));
             session.connecting = true;
             session.leader = leader;
-            session.members.add(playerId);
+            session.members.addAll(members);
 
             sessionsByLeader.put(leader, session);
-            leaderOfMember.put(playerId, leader);
+            for (UUID member : members) {
+                leaderOfMember.put(member, leader);
+            }
 
             visitRadius.putIfAbsent(leader, DEFAULT_RADIUS);
             moveRadius.putIfAbsent(leader,  DEFAULT_RADIUS);
 
             player.sendMessage(Component.text("🌍 Spinning up your personal Earth...", NamedTextColor.AQUA));
+            logger.info("[Session] Spawning new server {} for /visit leader {} (port {}, RCON {})", name, leader, port, rconPort);
             ServerSession finalSession = session;
-            String user = player.getUsername();
-            String quoted = visitArg.indexOf(' ') >= 0 ? "\"" + visitArg.replace("\"", "\\\"") + "\"" : visitArg;
-            String consoleCmd = "visitother " + user + " " + quoted;
-            String playerCmd  = "visitother " + user + " " + quoted;
-            executor.submit(() -> spawnAndConnectThenRun(player, finalSession, consoleCmd, playerCmd));
+            executor.submit(() -> spawnAndConnectThenRun(player, finalSession, playerCmd));
         } else {
             if (!isOnSessionServer(player, session)) {
                 connectToExistingServer(player, session);
             }
-            String user = player.getUsername();
-            String quoted = visitArg.indexOf(' ') >= 0 ? "\"" + visitArg.replace("\"", "\\\"") + "\"" : visitArg;
-            scheduleBackendCommandAfterConnect(player, session,
-                    "visitother " + user + " " + quoted,
-                    "visitother " + user + " " + quoted);
+            scheduleBackendCommandAfterConnect(player, session, playerCmd);
         }
     }
 
@@ -528,16 +588,64 @@ public class DynamicLoader {
         return parties.leaderOf(playerId);
     }
 
-    private boolean forwardPlayerCommand(Player player, UUID leader, String label, String... args) {
-        String playerCommand = label;
-        if (args != null && args.length > 0) {
-            playerCommand += " " + String.join(" ", args);
-        }
-        String consoleCommand = "execute as " + player.getUsername() + " run " + playerCommand;
-        return forwardCommandToSession(player, leader, consoleCommand, playerCommand);
+    private Collection<UUID> partyMembersFor(UUID leader) {
+        return parties.getPartyOf(leader)
+                .map(p -> new ArrayList<>(p.members))
+                .orElseGet(() -> {
+                    ArrayList<UUID> single = new ArrayList<>();
+                    single.add(leader);
+                    return single;
+                });
     }
 
-    private boolean forwardCommandToSession(Player player, UUID leader, String consoleCommand, String playerCommand) {
+    private ServerSession adoptWarmSession(UUID leader, Collection<UUID> members) {
+        ServerSession warm = warmPool.poll();
+        if (warm == null) {
+            return null;
+        }
+
+        String oldName = warm.name;
+        String newName = "voxelearth-" + leader.toString().substring(0, 8);
+
+        try {
+            proxy.unregisterServer(warm.info);
+        } catch (Exception ignored) {
+        }
+
+        ServerInfo alias = new ServerInfo(newName, warm.info.getAddress());
+        warm.name = newName;
+        warm.info = alias;
+        warm.leader = leader;
+        warm.members.clear();
+        warm.members.addAll(members);
+
+        proxy.registerServer(alias);
+
+        logger.info("[Warm] Warm session {} renamed and adopted as {} for leader {}", oldName, newName, leader);
+        sessionsByLeader.put(leader, warm);
+        for (UUID member : members) {
+            leaderOfMember.put(member, leader);
+        }
+
+        platformInitialized.remove(oldName);
+        platformInitialized.add(newName);
+
+        visitRadius.putIfAbsent(leader, DEFAULT_RADIUS);
+        moveRadius.putIfAbsent(leader, DEFAULT_RADIUS);
+
+        return warm;
+    }
+
+    private boolean forwardPlayerCommand(Player player, UUID leader, String label, String... args) {
+        String playerCommand = sanitizeCommandLine(label, args);
+        if (playerCommand.isBlank()) {
+            player.sendMessage(Component.text("Invalid command parameters.", NamedTextColor.RED));
+            return false;
+        }
+        return forwardCommandToSession(player, leader, playerCommand);
+    }
+
+    private boolean forwardCommandToSession(Player player, UUID leader, String playerCommand) {
         UUID resolvedLeader = leader != null ? leader : player.getUniqueId();
         ServerSession session = sessionsByLeader.get(resolvedLeader);
         if (session == null) {
@@ -558,11 +666,270 @@ public class DynamicLoader {
             }
         }
 
-        scheduleBackendCommandAfterConnect(player, session, consoleCommand, playerCommand);
+        String safeCommand = sanitizeForSpoof(playerCommand);
+        if (safeCommand.isBlank()) {
+            player.sendMessage(Component.text("Invalid command parameters.", NamedTextColor.RED));
+            return false;
+        }
+        scheduleBackendCommandAfterConnect(player, session, safeCommand);
         return true;
     }
 
+private ServerSession spawnWarm() {
+    ServerSession session = new ServerSession();
+    session.name = "voxelearth-warm-" + UUID.randomUUID().toString().substring(0, 4);
+    session.port = 30070 + ThreadLocalRandom.current().nextInt(1000);
+    session.rconPort = session.port + 10;
+    session.rconPass = generateRconPassword();
+    session.folder = Paths.get("servers", session.name); // kept for cleanup; Python picks actual on disk
+    session.info = new ServerInfo(session.name, new InetSocketAddress("127.0.0.1", session.port));
+    session.connecting = true;
+
+    // Resolve absolute paths relative to the proxy’s true runtime CWD
+    Path workdir   = Paths.get("").toAbsolutePath();
+    Path spawner   = workdir.resolve("spawn_server.py");
+    Path template  = workdir.resolve("voxelearth.zip");
+    Path baseDir   = workdir.resolve("templates").resolve("voxelearth-base");
+    Path spawnLog  = workdir.resolve("spawn_server.log"); // single rolling log is fine; rotate if you prefer
+
+    logger.info("[Warm] Spawning {} on port {} (RCON {})", session.name, session.port, session.rconPort);
+    logger.info("[Spawn] workdir={} spawner={} template={} base={}", workdir, spawner, template, baseDir);
+
+    executor.submit(() -> {
+        try {
+            // Build a fully-qualified command; pass absolute paths so Python never guesses
+            ProcessBuilder pb = new ProcessBuilder(
+                    "python3", spawner.toString(),
+                    "warm",
+                    String.valueOf(session.port),
+                    "--rcon-port", String.valueOf(session.rconPort),
+                    "--rcon-pass", session.rconPass,
+                    "--template", template.toString(),
+                    "--base-dir", baseDir.toString(),
+                    "--empty-world"
+            );
+            pb.directory(workdir.toFile());               // explicit working dir (critical) :contentReference[oaicite:1]{index=1}
+            pb.redirectErrorStream(true);
+            pb.redirectOutput(ProcessBuilder.Redirect.appendTo(spawnLog.toFile()));
+            // reduce “buffered output” surprises from Python
+            pb.environment().put("PYTHONUNBUFFERED", "1");
+
+            session.process = pb.start();
+
+            // Quickly detect “exited immediately” so failures are obvious in logs
+            try {
+                Thread.sleep(1500);
+                if (!session.process.isAlive()) {
+                    int code = session.process.exitValue();
+                    logger.warn("[Spawn] {} spawner exited early (code {}). See {}", session.name, code, spawnLog);
+                }
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            } catch (IllegalThreadStateException ignored) {
+                // process still alive
+            }
+
+            proxy.registerServer(session.info);
+
+            boolean reached = false;
+            long deadline = System.nanoTime() + Duration.ofSeconds(60).toNanos();
+            while (System.nanoTime() < deadline) {
+                try {
+                    proxy.getServer(session.name).orElseThrow().ping().join();
+                    reached = true;
+                    break;
+                } catch (Exception ignored) {
+                    try { Thread.sleep(500); }
+                    catch (InterruptedException ie) { Thread.currentThread().interrupt(); return; }
+                }
+            }
+
+            session.connecting = false;
+
+            if (!reached) {
+                logger.warn("[Warm] {} did not respond to pings within 60s. Cleaning up. See {}",
+                        session.name, spawnLog);
+                warmPool.remove(session);
+                cleanupSession(null, session);
+                return;
+            }
+
+            logger.info("[Warm] {} responding to pings", session.name);
+            if (platformInitialized.add(session.name)) {
+                ensureSpawnPlatformViaRcon(session);
+            }
+
+        } catch (Exception e) {
+            logger.warn("Warm spawn failed for {}: {}. See {}", session.name, e.toString(), spawnLog);
+            warmPool.remove(session);
+            cleanupSession(null, session);
+        }
+    });
+
+    return session;
+}
+
+
+    private void shutdownWarm(ServerSession session) {
+        if (session == null) {
+            return;
+        }
+        executor.submit(() -> cleanupSession(null, session));
+    }
+
+    private boolean connectLeader(Player leaderPlayer, ServerSession session, boolean sendSuccessMessage) {
+        boolean ok = waitForBackendAndConnect(leaderPlayer, session.name, Duration.ofSeconds(90));
+        if (!ok) {
+            leaderPlayer.sendMessage(Component.text("❌ Failed to connect — server took too long.", NamedTextColor.RED));
+            cleanupSession(leaderPlayer, session);
+            return false;
+        }
+
+        session.connecting = false;
+        if (platformInitialized.add(session.name)) {
+            ensureSpawnPlatformViaRcon(session);
+        }
+
+        ensurePlayerSupported(session, leaderPlayer.getUsername());
+        if (sendSuccessMessage) {
+            leaderPlayer.sendMessage(Component.text("✅ Connected to your personal Earth!", NamedTextColor.GREEN));
+        }
+        return true;
+    }
+
+    private void pullPartyMembers(ServerSession session) {
+        for (UUID memberId : session.members) {
+            if (session.leader != null && memberId.equals(session.leader)) {
+                continue;
+            }
+            proxy.getPlayer(memberId).ifPresent(member -> executor.submit(() ->
+                    tryConnect(member, session.name, 12, 2_000)
+            ));
+        }
+    }
+
+    private boolean waitForBackendAndConnect(Player player, String serverName, Duration timeout) {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (System.nanoTime() < deadline) {
+            try {
+                Optional<RegisteredServer> opt = proxy.getServer(serverName);
+                if (opt.isEmpty()) {
+                    Thread.sleep(500);
+                    continue;
+                }
+                RegisteredServer server = opt.get();
+                server.ping().join();
+                boolean alreadyThere = player.getCurrentServer()
+                        .map(cs -> cs.getServerInfo().getName().equalsIgnoreCase(serverName))
+                        .orElse(false);
+                if (!alreadyThere) {
+                    player.createConnectionRequest(server).connectWithIndication().join();
+                }
+                return true;
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return false;
+            } catch (Exception ignored) {
+                try {
+                    Thread.sleep(750);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+            }
+        }
+        return false;
+    }
+
     private int clamp(int v) { return Math.max(RADIUS_MIN, Math.min(RADIUS_MAX, v)); }
+
+    private String sanitizeVisitInput(String input) {
+        if (input == null) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        boolean lastSpace = false;
+        for (char c : input.toCharArray()) {
+            if (Character.isLetterOrDigit(c)) {
+                sb.append(c);
+                lastSpace = false;
+            } else if (c == ' ') {
+                if (!lastSpace && sb.length() > 0) {
+                    sb.append(' ');
+                    lastSpace = true;
+                }
+            } else if (c == ',' || c == '.' || c == '-' || c == '/') {
+                sb.append(c);
+                lastSpace = false;
+            }
+        }
+        int len = sb.length();
+        if (len == 0) {
+            return "";
+        }
+        if (lastSpace) {
+            sb.setLength(len - 1);
+        }
+        return sb.toString().trim();
+    }
+
+    private String sanitizeCommandToken(String input) {
+        if (input == null) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (char c : input.toCharArray()) {
+            if (Character.isLetterOrDigit(c) || c == '_' || c == '-' || c == '.') {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+
+    private String sanitizeCommandLine(String label, String... args) {
+        String cleanLabel = sanitizeCommandToken(label);
+        if (cleanLabel.isBlank()) {
+            return "";
+        }
+        List<String> parts = new ArrayList<>();
+        parts.add(cleanLabel);
+        if (args != null) {
+            for (String arg : args) {
+                String clean = sanitizeCommandToken(arg);
+                if (!clean.isBlank()) {
+                    parts.add(clean);
+                }
+            }
+        }
+        return String.join(" ", parts);
+    }
+
+    private String sanitizeForSpoof(String command) {
+        if (command == null) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        boolean lastSpace = false;
+        for (char c : command.toCharArray()) {
+            if (Character.isLetterOrDigit(c) || c == '_' || c == '-' || c == '.' || c == ',' || c == '/') {
+                sb.append(c);
+                lastSpace = false;
+            } else if (c == ' ') {
+                if (!lastSpace && sb.length() > 0) {
+                    sb.append(' ');
+                    lastSpace = true;
+                }
+            }
+        }
+        int len = sb.length();
+        if (len == 0) {
+            return "";
+        }
+        if (lastSpace) {
+            sb.setLength(len - 1);
+        }
+        return sb.toString().trim();
+    }
 
     private void handlePartyAction(Player p, PartyAction action) {
         switch (action) {
@@ -600,36 +967,12 @@ public class DynamicLoader {
             session.process = pb.start();
 
             proxy.registerServer(session.info);
-
-            // Fake loading bar for ~30 seconds
-            showLoadingBar(leaderPlayer, 30);
-
-            // Then try connecting every 10 seconds
-            boolean ok = tryConnect(leaderPlayer, session.name, /*attempts*/24, /*backoffMs*/10_000);
-            if (!ok) {
-                leaderPlayer.sendMessage(Component.text("❌ Failed to connect — server took too long.", NamedTextColor.RED));
-                cleanupSession(leaderPlayer, session);
+            if (!connectLeader(leaderPlayer, session, true)) {
                 return;
             }
-            session.connecting = false;
 
-            if (platformInitialized.add(session.name)) {
-                try { Thread.sleep(300); } catch (InterruptedException ignored) {}
-                ensureSpawnPlatformViaRcon(session);
-            }
-
-            // Ensure safe footing for the leader immediately upon join
-            ensurePlayerSupported(session, leaderPlayer.getUsername());
-
-            for (UUID memberId : session.members) {
-                if (memberId.equals(session.leader)) continue;
-                proxy.getPlayer(memberId).ifPresent(m -> {
-                    tryConnect(m, session.name, 12, 10_000);
-                });
-                Thread.sleep(150);
-            }
-
-            leaderPlayer.sendMessage(Component.text("✅ Connected to your personal Earth!", NamedTextColor.GREEN));
+            logger.info("[Session] Server {} ready for leader {}", session.name, session.leader);
+            pullPartyMembers(session);
 
         } catch (Exception e) {
             logger.error("Failed to spawn dynamic server for {}", leaderPlayer.getUsername(), e);
@@ -638,7 +981,7 @@ public class DynamicLoader {
         }
     }
 
-    private void spawnAndConnectThenRun(Player leaderPlayer, ServerSession session, String consoleCmd, String playerCmd) {
+    private void spawnAndConnectThenRun(Player leaderPlayer, ServerSession session, String playerCmd) {
         try {
             ProcessBuilder pb = new ProcessBuilder("python3", "spawn_server.py",
                     session.leader.toString(),
@@ -652,42 +995,18 @@ public class DynamicLoader {
 
             proxy.registerServer(session.info);
 
-            // Fake loading bar for ~30 seconds
-            showLoadingBar(leaderPlayer, 30);
-
-            // Then try connecting every 10 seconds
-            boolean ok = tryConnect(leaderPlayer, session.name, 24, 10_000);
-            if (!ok) {
-                leaderPlayer.sendMessage(Component.text("❌ Failed to connect — server took too long.", NamedTextColor.RED));
-                cleanupSession(leaderPlayer, session);
+            if (!connectLeader(leaderPlayer, session, false)) {
                 return;
             }
-            session.connecting = false;
 
-            if (platformInitialized.add(session.name)) {
-                try { Thread.sleep(300); } catch (InterruptedException ignored) {}
-                ensureSpawnPlatformViaRcon(session);
-            }
-
-            // ensure safe footing and then attempt action
-            ensurePlayerSupported(session, leaderPlayer.getUsername());
-            scheduleBackendCommandAfterConnect(leaderPlayer, session, consoleCmd, playerCmd);
+            logger.info("[Session] Server {} ready for leader {} (queued command)", session.name, session.leader);
+            pullPartyMembers(session);
+            scheduleBackendCommandAfterConnect(leaderPlayer, session, playerCmd);
 
         } catch (Exception e) {
             logger.error("Spawn/connect failed for {}", leaderPlayer.getUsername(), e);
             leaderPlayer.sendMessage(Component.text("❌ Error while creating your world.", NamedTextColor.RED));
             cleanupSession(leaderPlayer, session);
-        }
-    }
-
-    private void showLoadingBar(Player player, int seconds) throws InterruptedException {
-        final int total = seconds;
-        for (int i = 0; i <= total; i++) {
-            int filled = i;
-            int empty  = total - i;
-            String bar = "Loading [" + "=".repeat(filled) + " ".repeat(Math.max(0, empty)) + "]";
-            if (player.isActive()) player.sendActionBar(Component.text(bar, NamedTextColor.GREEN));
-            Thread.sleep(1000);
         }
     }
 
@@ -729,59 +1048,194 @@ public class DynamicLoader {
         );
     }
 
-    private void scheduleBackendCommandAfterConnect(Player player, ServerSession session, String consoleCommand, String playerCommand) {
+    private void scheduleBackendCommandAfterConnect(Player player, ServerSession session, String playerCommand) {
         executor.submit(() -> {
-            try { Thread.sleep(4000); } catch (InterruptedException ignored) {}
-            runRconOrFallback(player, session, consoleCommand, playerCommand);
+            try {
+                Thread.sleep(4_000);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+
+            if (!waitForPlayerOnServer(player, session, Duration.ofSeconds(45))) {
+                logger.warn("Player {} did not reach {} in time; showing fallback", player.getUsername(), session.name);
+                showClickableFallback(player, playerCommand);
+                return;
+            }
+
+        String safeCommand = sanitizeForSpoof(playerCommand);
+        if (safeCommand.isBlank()) {
+        logger.warn("Sanitized command for {} came back empty; showing fallback", player.getUsername());
+        showClickableFallback(player, playerCommand);
+        return;
+        }
+
+        String chatCommand = "/" + safeCommand;
+        UUID playerId = player.getUniqueId();
+        proxy.getScheduler().buildTask(this, () ->
+            proxy.getPlayer(playerId).ifPresentOrElse(
+                target -> target.spoofChatInput(chatCommand),
+                () -> logger.warn("Player {} went offline before spoofing {}", playerId, chatCommand)
+            )
+        ).schedule();
         });
     }
 
-    private void runRconOrFallback(Player player, ServerSession session, String consoleCommand, String playerCommand) {
-        logger.info("RCON-> {}:{} :: {}", session.name, session.rconPort, consoleCommand);
-        boolean wrote = false;
-        if (session.rconPort > 0 && session.rconPass != null) {
-            try (RconClient rc = new RconClient("127.0.0.1", session.rconPort, session.rconPass)) {
-                rc.connect();
-                rc.commandNoReply(consoleCommand);
-                wrote = true;
-            } catch (Exception e) {
-                logger.warn("RCON error {}:{} :: {}", session.name, session.rconPort, e.toString());
+    private boolean waitForPlayerOnServer(Player player, ServerSession session, Duration timeout) {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (System.nanoTime() < deadline) {
+            if (isOnSessionServer(player, session)) {
+                return true;
+            }
+            try {
+                Thread.sleep(300);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return false;
             }
         }
-        // Always provide a fallback click so players can retrigger if the backend lags.
-        // player.sendMessage(
-        //         Component.text("Teleporting… ", NamedTextColor.YELLOW)
-        //                 .append(Component.text("[Click if not teleported in ~10s]", NamedTextColor.AQUA)
-        //                         .clickEvent(net.kyori.adventure.text.event.ClickEvent.runCommand("/" + playerCommand))))
-        // ;
+        return false;
+    }
 
-        if (wrote) {
-            logger.info("RCON write succeeded (no reply expected).");
+    private boolean waitForRcon(ServerSession session, Duration timeout) {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        long backoff = 150;
+        while (System.nanoTime() < deadline) {
+            try (RconClient rc = new RconClient("127.0.0.1", session.rconPort, session.rconPass)) {
+                rc.connect();
+                rc.command("list");
+                return true;
+            } catch (Exception e) {
+                try {
+                    Thread.sleep(backoff);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+                backoff = Math.min(1_500, backoff * 2);
+            }
         }
+        return false;
+    }
+
+    private boolean waitForPlayerEntity(ServerSession session, String playerName, Duration timeout) {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        long backoff = 200;
+        String command = "data get entity " + playerName + " Pos[0]";
+        while (System.nanoTime() < deadline) {
+            try (RconClient rc = new RconClient("127.0.0.1", session.rconPort, session.rconPass)) {
+                rc.connect();
+                String response = rc.command(command);
+                if (response != null && !response.toLowerCase(Locale.ROOT).contains("no entity")) {
+                    return true;
+                }
+            } catch (Exception ignored) {
+            }
+            try {
+                Thread.sleep(backoff);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+            backoff = Math.min(2_000, backoff + 200);
+        }
+        return false;
+    }
+
+    private boolean sendRconWithRetry(ServerSession session, String consoleCommand, int attempts, long firstBackoffMs) {
+        if (session.rconPort <= 0 || session.rconPass == null) {
+            return false;
+        }
+
+        long backoff = firstBackoffMs;
+        for (int i = 0; i < attempts; i++) {
+            try (RconClient rc = new RconClient("127.0.0.1", session.rconPort, session.rconPass)) {
+                rc.connect();
+                rc.command(consoleCommand);
+                return true;
+            } catch (Exception e) {
+                if (i == attempts - 1) {
+                    break;
+                }
+                long jitter = ThreadLocalRandom.current().nextInt(60);
+                try {
+                    Thread.sleep(backoff + jitter);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+                backoff = Math.min(2_000, backoff * 2);
+            }
+        }
+        return false;
+    }
+
+    private void showClickableFallback(Player player, String playerCommand) {
+        String safeCommand = sanitizeForSpoof(playerCommand);
+        if (safeCommand.isBlank()) {
+            return;
+        }
+        UUID playerId = player.getUniqueId();
+        proxy.getScheduler().buildTask(this, () ->
+                proxy.getPlayer(playerId).ifPresent(target ->
+                        target.sendMessage(
+                                Component.text("Command queued. ", NamedTextColor.YELLOW)
+                                        .append(Component.text("[Click if nothing happens]", NamedTextColor.AQUA)
+                                                .clickEvent(ClickEvent.runCommand("/" + safeCommand)))))
+        ).schedule();
     }
 
     private static String generateRconPassword() {
         return UUID.randomUUID().toString().replace("-", "").substring(0, 16);
     }
 
-    private void ensureSpawnPlatformViaRcon(ServerSession s) {
-        try (RconClient rc = new RconClient("127.0.0.1", s.rconPort, s.rconPass)) {
-            rc.connect();
-            rc.command("fill -5 180 -5 5 180 5 glass");
-            rc.command("setworldspawn 0 181 0");
-        } catch (Exception e) {
-            logger.warn("Could not initialize spawn platform for {}: {}", s.name, e.toString());
+    private void ensureSpawnPlatformViaRcon(ServerSession session) {
+        int attempts = 3;
+        long backoff = 500;
+        for (int i = 1; i <= attempts; i++) {
+            if (!waitForRcon(session, Duration.ofSeconds(30))) {
+                logger.warn("Unable to initialize platform for {} — RCON unavailable (attempt {}/{})", session.name, i, attempts);
+            } else {
+                boolean fill = sendRconWithRetry(session, "fill -5 180 -5 5 180 5 glass", 12, 200);
+                boolean spawn = sendRconWithRetry(session, "setworldspawn 0 181 0", 12, 200);
+                if (fill && spawn) {
+                    logger.info("[Platform] Spawn platform initialized for {}", session.name);
+                    return;
+                }
+                logger.warn("Spawn platform commands failed for {} on attempt {}/{}", session.name, i, attempts);
+            }
+            try {
+                Thread.sleep(backoff);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+            backoff *= 2;
         }
+        logger.warn("Failed to initialize spawn platform for {} after {} attempts", session.name, attempts);
     }
 
-    private void ensurePlayerSupported(ServerSession s, String playerName) {
-        try (RconClient rc = new RconClient("127.0.0.1", s.rconPort, s.rconPass)) {
-            rc.connect();
-            // place a block under the player if needed, then nudge them up 0.2
-            rc.command("execute as " + playerName + " at @s if block ~ ~-1 ~ air run setblock ~ ~-1 ~ glass");
-            rc.command("execute as " + playerName + " at @s run tp @s ~ ~0.2 ~");
-        } catch (Exception e) {
-            logger.warn("Could not ensure support for {} in {}: {}", playerName, s.name, e.toString());
+    private void ensurePlayerSupported(ServerSession session, String playerName) {
+        if (!waitForRcon(session, Duration.ofSeconds(30))) {
+            logger.warn("Unable to ensure support for {} on {} — RCON unavailable", playerName, session.name);
+            return;
+        }
+
+        if (!waitForPlayerEntity(session, playerName, Duration.ofSeconds(20))) {
+            logger.warn("Entity for {} not ready on {} when attempting support", playerName, session.name);
+            return;
+        }
+
+        boolean support = sendRconWithRetry(session,
+                "execute as " + playerName + " at @s if block ~ ~-1 ~ air run setblock ~ ~-1 ~ glass",
+                6,
+                200);
+        boolean nudge = sendRconWithRetry(session,
+                "execute as " + playerName + " at @s run tp @s ~ ~0.2 ~",
+                6,
+                200);
+        if (!support || !nudge) {
+            logger.warn("Support commands for {} on {} did not complete", playerName, session.name);
         }
     }
 
@@ -851,6 +1305,21 @@ public class DynamicLoader {
         }
     }
 
+    @Subscribe
+    public void onProxyShutdown(ProxyShutdownEvent event) {
+        logger.info("Proxy shutdown detected. Stopping warm pool and cleaning dynamic servers.");
+        try {
+            warmKeeper.shutdownNow();
+        } catch (Exception ex) {
+            logger.warn("Warm pool scheduler shutdown encountered an issue", ex);
+        }
+
+        cleanupAllSessions();
+
+        executor.shutdownNow();
+        clearServersDirectory();
+    }
+
     private void cleanupSession(Player player, ServerSession session) {
         try {
             if (session.process != null && session.process.isAlive()) {
@@ -872,8 +1341,66 @@ public class DynamicLoader {
         } finally {
             for (UUID m : session.members) leaderOfMember.remove(m);
             platformInitialized.remove(session.name);
-            visitRadius.remove(session.leader);
-            moveRadius.remove(session.leader);
+            if (session.leader != null) {
+                sessionsByLeader.remove(session.leader, session);
+                visitRadius.remove(session.leader);
+                moveRadius.remove(session.leader);
+            }
+            warmPool.remove(session);
+        }
+    }
+
+    private void cleanupAllSessions() {
+        Set<ServerSession> unique = Collections.newSetFromMap(new ConcurrentHashMap<>());
+        unique.addAll(sessionsByLeader.values());
+        unique.addAll(warmPool);
+
+        for (ServerSession session : unique) {
+            if (session == null) {
+                continue;
+            }
+            try {
+                cleanupSession(null, session);
+            } catch (Exception ex) {
+                logger.warn("Error while cleaning session {} during shutdown", session.name, ex);
+            }
+        }
+
+        warmPool.clear();
+        sessionsByLeader.clear();
+        leaderOfMember.clear();
+        visitRadius.clear();
+        moveRadius.clear();
+        platformInitialized.clear();
+    }
+
+    private void clearServersDirectory() {
+        Path root = Paths.get("servers");
+        if (!Files.exists(root)) {
+            return;
+        }
+
+        try (var paths = Files.walk(root)) {
+            paths.sorted(Comparator.reverseOrder())
+                    .filter(path -> !path.equals(root))
+                    .forEach(path -> {
+                        try {
+                            Files.deleteIfExists(path);
+                        } catch (IOException ex) {
+                            logger.warn("Failed to delete {} during shutdown cleanup", path, ex);
+                        }
+                    });
+        } catch (IOException ex) {
+            logger.warn("Unable to walk servers directory for cleanup", ex);
+        }
+
+        try {
+            if (Files.exists(root)) {
+                Files.deleteIfExists(root);
+            }
+            Files.createDirectories(root);
+        } catch (IOException ex) {
+            logger.warn("Unable to reset servers directory after cleanup", ex);
         }
     }
 }

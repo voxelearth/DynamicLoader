@@ -199,16 +199,16 @@ echo "[*] Copying forwarding.secret, spawn_server.py, voxelearth.zip, and veloci
 cp "$FORWARD_SECRET" "$SPAWN_SCRIPT" "$ZIP_PATH" "$VELOCITY_TOML" "$VELOCITY_DIR/"
 
 # --- Update velocity.toml with correct Windows IP ---
-WINDOWS_IP=$(ip route | grep -i default | awk '{print $3}')
-echo "[*] Updating velocity.toml with Windows host IP $WINDOWS_IP:25566..."
-VELOCITY_TOML_PATH="$VELOCITY_DIR/velocity.toml"
+# WINDOWS_IP=$(ip route | grep -i default | awk '{print $3}')
+# echo "[*] Updating velocity.toml with Windows host IP $WINDOWS_IP:25566..."
+# VELOCITY_TOML_PATH="$VELOCITY_DIR/velocity.toml"
 
-# Replace existing lobby line or add if missing
-if grep -q '^lobby\s*=' "$VELOCITY_TOML_PATH"; then
-    sed -i "s|^lobby\s*=.*|lobby = \"$WINDOWS_IP:25566\"|" "$VELOCITY_TOML_PATH"
-else
-    echo "lobby = \"$WINDOWS_IP:25566\"" >> "$VELOCITY_TOML_PATH"
-fi
+# # Replace existing lobby line or add if missing
+# if grep -q '^lobby\s*=' "$VELOCITY_TOML_PATH"; then
+#     sed -i "s|^lobby\s*=.*|lobby = \"$WINDOWS_IP:25566\"|" "$VELOCITY_TOML_PATH"
+# else
+#     echo "lobby = \"$WINDOWS_IP:25566\"" >> "$VELOCITY_TOML_PATH"
+# fi
 
 # --- Add our build/libs/DynamicLoader*.jar to Velocity plugins ---
 # --- if it exists, otherwise, build it first. ---
@@ -241,8 +241,18 @@ if (-not (Get-Command java -ErrorAction SilentlyContinue)) { \
 
 # --- Start Paper (Windows side) ---
 echo "[*] Launching Paper server in Windows terminal..."
-PAPER_PATH="$(wslpath -w "$SERVER_DIR")"
-cmd.exe /C start "Paper Server" powershell -NoExit -Command "cd '$PAPER_PATH'; java -jar paper.jar"
+# PAPER_PATH="$(wslpath -w "$SERVER_DIR")"
+# cmd.exe /C start "Paper Server" powershell -NoExit -Command "cd '$PAPER_PATH'; java -jar paper.jar"
+# Launch paper inside WSL to avoid issues with paths
+PAPER_PATH="$SERVER_DIR"
+# IN LINUX a new subprocess is created to run the paper server in background
+(
+  cd "$PAPER_PATH"
+  echo "[*] Starting Paper server in background..."
+  nohup java -jar paper.jar > paper_server.log 2>&1 &
+)
+echo "[✓] Paper server started in background."
+
 
 # --- Start Velocity (stay in Ubuntu) ---
 echo "[*] Starting Velocity in this terminal..."

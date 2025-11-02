@@ -28,98 +28,11 @@ import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.file.*;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.FileVisitResult;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Duration;
-import java.util.*;
-import java.util.concurrent.*;
-
-/**
- * Velocity-only DynamicLoader:
- * - Slot 9 Navigator (client-side) + chest GUIs using Protocolize v2
- * - Per-party world spawn, leader-first connect, auto-pull friends
- * - Backend commands via RCON (fallback: clickable)
- * - One-time void-proof platform on new worlds
- */
-@Plugin(
-        id = "dynamicloader",
-        name = "DynamicLoader",
-        version = "1.6.2",
-        description = "Spawns per-party servers and provides GUI & lobby management from Velocity.",
-        dependencies = { @Dependency(id = "protocolize") }
-)
-public class DynamicLoader {
-
-    private final ProxyServer proxy;
-    private final ComponentLogger logger;
-
-    // One world per party leader
-    private final Map<UUID, ServerSession> sessionsByLeader = new ConcurrentHashMap<>();
-    private final Map<UUID, UUID> leaderOfMember = new ConcurrentHashMap<>();
-
-    // Settings state (tracked per leader on the proxy to support ±50 buttons)
-    private final Map<UUID, Integer> visitRadius = new ConcurrentHashMap<>();
-    private final Map<UUID, Integer> moveRadius  = new ConcurrentHashMap<>();
-    private static final int DEFAULT_RADIUS = 256;
-    private static final int RADIUS_STEP    = 50;
-    private static final int RADIUS_MIN     = 50;
-    private static final int RADIUS_MAX     = 1024;
-
-    private final ExecutorService executor = Executors.newCachedThreadPool();
-    private static final String LOBBY_NAME = "lobby";
-
-    private final PartyManager parties;
-    private final Set<String> platformInitialized = ConcurrentHashMap.newKeySet();
-    private final Deque<ServerSession> warmPool = new ConcurrentLinkedDeque<>();
-    private final ScheduledExecutorService warmKeeper = Executors.newSingleThreadScheduledExecutor(r -> {
-        Thread t = new Thread(r, "DynamicLoader-warm");
-        t.setDaemon(true);
-        return t;
-    });
-    private static final int WARM_BUFFER = 2;
-
-    private NavigatorUI nav;
-
-    @Inject
-    public DynamicLoader(ProxyServer proxy, ComponentLogger logger) {
-        this.proxy = proxy;
-        this.logger = logger;
-        this.parties = new PartyManager(proxy);
-
-        proxy.getCommandManager().register("earth", new VoxelearthCommand());
-        proxy.getCommandManager().register("lobby", new LobbyCommand());
-        proxy.getCommandManager().register("party", new PartyCommand());
-        proxy.getCommandManager().register("help", new HelpCommand()); // override help
-        proxy.getCommandManager().register("visit", new VisitCommand());
-        proxy.getCommandManager().register("visitradius", new VisitRadiusCommand());
-        proxy.getCommandManager().register("visitradiusother", new VisitRadiusOtherCommand());
-        proxy.getCommandManager().register("moveradius", new MoveRadiusCommand());
-        proxy.getCommandManager().register("moveradiusother", new MoveRadiusOtherCommand());
-        proxy.getCommandManager().register("moveload", new MoveLoadCommand());
-        proxy.getCommandManager().register("moveloadother", new MoveLoadOtherCommand());
-    }
-
-    /** Initialize Protocolize-driven UI after the proxy + dependencies are ready. */
-    @Subscribe
-    public void onProxyInit(ProxyInitializeEvent e) {
-        if (!protocolizeAvailable()) {
-            logger.error("Protocolize not found. Install protocolize-velocity (2.4.x) into the /plugins folder.");
-            return;
-        }
-        this.nav = new NavigatorUI(
-                List.of(
-                        new FamousPlace("Great Pyramids of Giza, Egypt",        "great pyramids of giza egypt"),
-                        new FamousPlace("Eiffel Tower, Paris France",           "eiffel tower paris"),
-                        new FamousPlace("Statue of Liberty, NYC USA",           "statue of liberty new york"),
-                        new FamousPlace("Taj Mahal, Agra India",                "taj mahal agra"),
-                        new FamousPlace("Sydney Opera House, Australia",        "sydney opera house"),
-                        new FamousPlace("Christ the Redeemer, Rio Brazil",      "christ the redeemer rio de janeiro"),
-                        new FamousPlace("Mount Everest Base Camp, Nepal",       "everest base camp nepal"),
-                        new FamousPlace("Grand Canyon South Rim, USA",          "grand canyon south rim"),
-                        new FamousPlace("Great Wall Mutianyu, China",           "great wall mutianyu"),
-                        new FamousPlace("Colosseum, Rome Italy",                "colosseum rome"),
-                        new FamousPlace("Machu Picchu, Peru",                   "machu picchu"),
-                        new FamousPlace("Burj Khalifa, Dubai UAE",              "burj khalifa dubai"),
-                        new FamousPlace("Golden Gate Bridge, San Francisco",    "golden gate bridge san francisco"),
-                        new FamousPlace("Big Ben, London UK",                   "big ben london"),
                         new FamousPlace("Niagara Falls, USA Canada",            "niagara falls"),
                         new FamousPlace("Santorini - Oia, Greece",              "oia santorini"),
                         new FamousPlace("Custom",                               ""),
@@ -149,7 +62,11 @@ public class DynamicLoader {
             try {
                 int target = Math.min(8, proxy.getAllPlayers().size() + WARM_BUFFER);
                 while (warmPool.size() < target) {
-                    warmPool.add(spawnWarm());
+                    ServerSession warm = spawnWarm();
+                    if (warm == null) {
+                        break;
+                    }
+                    warmPool.add(warm);
                 }
                 while (warmPool.size() > target) {
                     shutdownWarm(warmPool.pollLast());
@@ -180,6 +97,7 @@ public class DynamicLoader {
         boolean connecting = false;
         UUID leader;
         final Set<UUID> members = ConcurrentHashMap.newKeySet(); // includes leader
+        final AtomicBoolean cleaned = new AtomicBoolean(false);
     }
 
     // /help (override)
@@ -206,6 +124,11 @@ public class DynamicLoader {
             UUID leader = leaderFor(playerId);
             Party party = parties.getPartyOf(playerId).orElseGet(() -> parties.createOrGetParty(playerId));
             Collection<UUID> members = new ArrayList<>(party.members);
+
+            if (shuttingDown.get()) {
+                player.sendMessage(Component.text("Proxy is shutting down; please try again shortly.", NamedTextColor.RED));
+                return;
+            }
 
             ServerSession existing = sessionsByLeader.get(leader);
             if (existing != null) {
@@ -327,7 +250,7 @@ public class DynamicLoader {
                 case "disband" -> {
                     if (parties.isLeader(p.getUniqueId())) {
                         ServerSession s = sessionsByLeader.remove(p.getUniqueId());
-                        if (s != null) executor.submit(() -> cleanupSession(null, s));
+                        if (s != null) runAsync(() -> cleanupSession(null, s));
                         parties.disband(p.getUniqueId());
                     } else {
                         p.sendMessage(Component.text("Only the leader can disband.", NamedTextColor.RED));
@@ -454,6 +377,11 @@ public class DynamicLoader {
             player.sendMessage(Component.text("Use ", NamedTextColor.GRAY)
                     .append(Component.text("/visit <address>", NamedTextColor.GREEN))
                     .append(Component.text(" to jump to any location.", NamedTextColor.GRAY)));
+            return;
+        }
+
+        if (shuttingDown.get()) {
+            player.sendMessage(Component.text("Proxy is shutting down; please try again shortly.", NamedTextColor.RED));
             return;
         }
 
@@ -675,106 +603,132 @@ public class DynamicLoader {
         return true;
     }
 
-private ServerSession spawnWarm() {
-    ServerSession session = new ServerSession();
-    session.name = "voxelearth-warm-" + UUID.randomUUID().toString().substring(0, 4);
-    session.port = 30070 + ThreadLocalRandom.current().nextInt(1000);
-    session.rconPort = session.port + 10;
-    session.rconPass = generateRconPassword();
-    session.folder = Paths.get("servers", session.name); // kept for cleanup; Python picks actual on disk
-    session.info = new ServerInfo(session.name, new InetSocketAddress("127.0.0.1", session.port));
-    session.connecting = true;
+    private ServerSession spawnWarm() {
+        if (shuttingDown.get()) {
+            logger.info("[Warm] Ignoring warm spawn request (proxy shutting down)");
+            return null;
+        }
 
-    // Resolve absolute paths relative to the proxy’s true runtime CWD
-    Path workdir   = Paths.get("").toAbsolutePath();
-    Path spawner   = workdir.resolve("spawn_server.py");
-    Path template  = workdir.resolve("voxelearth.zip");
-    Path baseDir   = workdir.resolve("templates").resolve("voxelearth-base");
-    Path spawnLog  = workdir.resolve("spawn_server.log"); // single rolling log is fine; rotate if you prefer
+        ServerSession session = new ServerSession();
+        session.name = "voxelearth-warm-" + UUID.randomUUID().toString().substring(0, 4);
+        session.port = 30070 + ThreadLocalRandom.current().nextInt(1000);
+        session.rconPort = session.port + 10;
+        session.rconPass = generateRconPassword();
+        session.folder = Paths.get("servers", session.name);
+        session.info = new ServerInfo(session.name, new InetSocketAddress("127.0.0.1", session.port));
+        session.connecting = true;
 
-    logger.info("[Warm] Spawning {} on port {} (RCON {})", session.name, session.port, session.rconPort);
-    logger.info("[Spawn] workdir={} spawner={} template={} base={}", workdir, spawner, template, baseDir);
+        Path workdir  = Paths.get("").toAbsolutePath();
+        Path spawner  = workdir.resolve("spawn_server.py");
+        Path template = workdir.resolve("voxelearth.zip");
+        Path baseDir  = workdir.resolve("templates").resolve("voxelearth-base");
+        Path spawnLog = workdir.resolve("spawn_server.log");
 
-    executor.submit(() -> {
-        try {
-            // Build a fully-qualified command; pass absolute paths so Python never guesses
-            ProcessBuilder pb = new ProcessBuilder(
-                    "python3", spawner.toString(),
-                    "warm",
-                    String.valueOf(session.port),
-                    "--rcon-port", String.valueOf(session.rconPort),
-                    "--rcon-pass", session.rconPass,
-                    "--template", template.toString(),
-                    "--base-dir", baseDir.toString(),
-                    "--empty-world"
-            );
-            pb.directory(workdir.toFile());               // explicit working dir (critical) :contentReference[oaicite:1]{index=1}
-            pb.redirectErrorStream(true);
-            pb.redirectOutput(ProcessBuilder.Redirect.appendTo(spawnLog.toFile()));
-            // reduce “buffered output” surprises from Python
-            pb.environment().put("PYTHONUNBUFFERED", "1");
+        logger.info("[Warm] Spawning {} on port {} (RCON {})", session.name, session.port, session.rconPort);
+        logger.info("[Spawn] workdir={} spawner={} template={} base={}", workdir, spawner, template, baseDir);
 
-            session.process = pb.start();
-
-            // Quickly detect “exited immediately” so failures are obvious in logs
-            try {
-                Thread.sleep(1500);
-                if (!session.process.isAlive()) {
-                    int code = session.process.exitValue();
-                    logger.warn("[Spawn] {} spawner exited early (code {}). See {}", session.name, code, spawnLog);
-                }
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-            } catch (IllegalThreadStateException ignored) {
-                // process still alive
-            }
-
-            proxy.registerServer(session.info);
-
-            boolean reached = false;
-            long deadline = System.nanoTime() + Duration.ofSeconds(60).toNanos();
-            while (System.nanoTime() < deadline) {
-                try {
-                    proxy.getServer(session.name).orElseThrow().ping().join();
-                    reached = true;
-                    break;
-                } catch (Exception ignored) {
-                    try { Thread.sleep(500); }
-                    catch (InterruptedException ie) { Thread.currentThread().interrupt(); return; }
-                }
-            }
-
-            session.connecting = false;
-
-            if (!reached) {
-                logger.warn("[Warm] {} did not respond to pings within 60s. Cleaning up. See {}",
-                        session.name, spawnLog);
-                warmPool.remove(session);
+        executor.submit(() -> {
+            if (shuttingDown.get()) {
+                logger.info("[Warm] Abort warm spawn {} — proxy shutting down", session.name);
                 cleanupSession(null, session);
                 return;
             }
+            try {
+                ProcessBuilder pb = new ProcessBuilder(
+                        "python3", spawner.toString(),
+                        "warm",
+                        String.valueOf(session.port),
+                        "--rcon-port", String.valueOf(session.rconPort),
+                        "--rcon-pass", session.rconPass,
+                        "--template", template.toString(),
+                        "--base-dir", baseDir.toString(),
+                        "--empty-world"
+                );
+                pb.directory(workdir.toFile());
+                pb.redirectErrorStream(true);
+                pb.redirectOutput(ProcessBuilder.Redirect.appendTo(spawnLog.toFile()));
+                pb.environment().put("PYTHONUNBUFFERED", "1");
 
-            logger.info("[Warm] {} responding to pings", session.name);
-            if (platformInitialized.add(session.name)) {
-                ensureSpawnPlatformViaRcon(session);
+                session.process = pb.start();
+
+                if (shuttingDown.get()) {
+                    logger.info("[Warm] Shutdown triggered; terminating {}", session.name);
+                    killProcess(session.process, 0, 500);
+                    cleanupSession(null, session);
+                    return;
+                }
+
+                try {
+                    Thread.sleep(1500);
+                    if (!session.process.isAlive()) {
+                        int code = session.process.exitValue();
+                        logger.warn("[Spawn] {} spawner exited early (code {}). See {}", session.name, code, spawnLog);
+                    }
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                } catch (IllegalThreadStateException ignored) {
+                    // process still alive
+                }
+
+                if (shuttingDown.get()) {
+                    logger.info("[Warm] Shutdown triggered before registering {}; cleaning up", session.name);
+                    killProcess(session.process, 0, 500);
+                    cleanupSession(null, session);
+                    return;
+                }
+
+                proxy.registerServer(session.info);
+
+                boolean reached = false;
+                long deadline = System.nanoTime() + Duration.ofSeconds(60).toNanos();
+                while (System.nanoTime() < deadline) {
+                    if (shuttingDown.get()) {
+                        logger.info("[Warm] Shutdown triggered while waiting for {}; cleaning up", session.name);
+                        cleanupSession(null, session);
+                        return;
+                    }
+                    try {
+                        proxy.getServer(session.name).orElseThrow().ping().join();
+                        reached = true;
+                        break;
+                    } catch (Exception ignored) {
+                        try {
+                            Thread.sleep(500);
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                            return;
+                        }
+                    }
+                }
+
+                session.connecting = false;
+
+                if (!reached) {
+                    logger.warn("[Warm] {} did not respond to pings within 60s. Cleaning up. See {}", session.name, spawnLog);
+                    cleanupSession(null, session);
+                    return;
+                }
+
+                logger.info("[Warm] Warm server {} responding to pings", session.name);
+                if (platformInitialized.add(session.name)) {
+                    ensureSpawnPlatformViaRcon(session);
+                }
+
+            } catch (Exception e) {
+                logger.warn("Warm spawn failed for {}: {}. See {}", session.name, e.toString(), spawnLog);
+                cleanupSession(null, session);
             }
+        });
 
-        } catch (Exception e) {
-            logger.warn("Warm spawn failed for {}: {}. See {}", session.name, e.toString(), spawnLog);
-            warmPool.remove(session);
-            cleanupSession(null, session);
-        }
-    });
-
-    return session;
-}
+        return session;
+    }
 
 
     private void shutdownWarm(ServerSession session) {
         if (session == null) {
             return;
         }
-        executor.submit(() -> cleanupSession(null, session));
+        runAsync(() -> cleanupSession(null, session));
     }
 
     private boolean connectLeader(Player leaderPlayer, ServerSession session, boolean sendSuccessMessage) {
@@ -941,7 +895,7 @@ private ServerSession spawnWarm() {
             case DISBAND -> {
                 if (parties.isLeader(p.getUniqueId())) {
                     ServerSession s = sessionsByLeader.remove(p.getUniqueId());
-                    if (s != null) executor.submit(() -> cleanupSession(null, s));
+                    if (s != null) runAsync(() -> cleanupSession(null, s));
                     parties.disband(p.getUniqueId());
                 } else {
                     p.sendMessage(Component.text("Only the leader can disband.", NamedTextColor.RED));
@@ -955,6 +909,11 @@ private ServerSession spawnWarm() {
     /* ========= Spawn/connect ========= */
 
     private void spawnAndConnectLeaderThenParty(Player leaderPlayer, ServerSession session) {
+        if (shuttingDown.get()) {
+            logger.info("[Session] Skipping spawn for {} (shutdown in progress)", session.name);
+            cleanupSession(null, session);
+            return;
+        }
         try {
             ProcessBuilder pb = new ProcessBuilder("python3", "spawn_server.py",
                     session.leader.toString(),
@@ -966,7 +925,19 @@ private ServerSession spawnWarm() {
             pb.directory(new File("."));
             session.process = pb.start();
 
+            if (shuttingDown.get()) {
+                logger.info("[Session] Shutdown triggered; terminating {}", session.name);
+                killProcess(session.process, 0, 500);
+                cleanupSession(null, session);
+                return;
+            }
+
             proxy.registerServer(session.info);
+            if (shuttingDown.get()) {
+                logger.info("[Session] Shutdown triggered before connect {}; cleaning up", session.name);
+                cleanupSession(null, session);
+                return;
+            }
             if (!connectLeader(leaderPlayer, session, true)) {
                 return;
             }
@@ -982,6 +953,11 @@ private ServerSession spawnWarm() {
     }
 
     private void spawnAndConnectThenRun(Player leaderPlayer, ServerSession session, String playerCmd) {
+        if (shuttingDown.get()) {
+            logger.info("[Session] Skipping spawn for {} (shutdown in progress)", session.name);
+            cleanupSession(null, session);
+            return;
+        }
         try {
             ProcessBuilder pb = new ProcessBuilder("python3", "spawn_server.py",
                     session.leader.toString(),
@@ -993,7 +969,19 @@ private ServerSession spawnWarm() {
             pb.directory(new File("."));
             session.process = pb.start();
 
+            if (shuttingDown.get()) {
+                logger.info("[Session] Shutdown triggered; terminating {}", session.name);
+                killProcess(session.process, 0, 500);
+                cleanupSession(null, session);
+                return;
+            }
+
             proxy.registerServer(session.info);
+            if (shuttingDown.get()) {
+                logger.info("[Session] Shutdown triggered before queued command on {}; cleaning up", session.name);
+                cleanupSession(null, session);
+                return;
+            }
 
             if (!connectLeader(leaderPlayer, session, false)) {
                 return;
@@ -1301,68 +1289,181 @@ private ServerSession spawnWarm() {
         if (!someoneOnline) {
             logger.info("Cleaning up dynamic server for party leader {}", leader);
             sessionsByLeader.remove(leader);
-            executor.submit(() -> cleanupSession(player, session));
+            runAsync(() -> cleanupSession(player, session));
         }
     }
 
     @Subscribe
     public void onProxyShutdown(ProxyShutdownEvent event) {
         logger.info("Proxy shutdown detected. Stopping warm pool and cleaning dynamic servers.");
+        shuttingDown.set(true);
         try {
             warmKeeper.shutdownNow();
         } catch (Exception ex) {
             logger.warn("Warm pool scheduler shutdown encountered an issue", ex);
         }
 
-        cleanupAllSessions();
+        executor.shutdown();
+        try {
+            if (!executor.awaitTermination(1, TimeUnit.SECONDS)) {
+                executor.shutdownNow();
+            }
+        } catch (InterruptedException ie) {
+            executor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
 
-        executor.shutdownNow();
+        cleanupAllSessions();
         clearServersDirectory();
     }
 
-    private void cleanupSession(Player player, ServerSession session) {
-        try {
-            if (session.process != null && session.process.isAlive()) {
-                session.process.destroy();
-                session.process.waitFor(5, TimeUnit.SECONDS);
-                if (session.process.isAlive()) session.process.destroyForcibly();
-            }
-            proxy.unregisterServer(session.info);
+    private boolean isRegistered(String name) {
+        return proxy.getServer(name).isPresent();
+    }
 
-            if (Files.exists(session.folder)) {
-                logger.info("Deleting folder {}", session.folder);
-                Files.walk(session.folder)
-                        .sorted(Comparator.reverseOrder())
-                        .map(Path::toFile)
-                        .forEach(File::delete);
+    private void safeUnregister(ServerInfo info) {
+        try {
+            if (info != null && isRegistered(info.getName())) {
+                proxy.unregisterServer(info);
             }
-        } catch (Exception e) {
-            logger.error("Error cleaning up server {}", session.name, e);
+        } catch (Exception ignored) {
+            // Already unregistered or proxy is shutting down.
+        }
+    }
+
+    private void killProcess(Process process, long softMs, long hardMs) {
+        if (process == null) {
+            return;
+        }
+        try {
+            process.destroy();
+            if (process.waitFor(softMs, TimeUnit.MILLISECONDS)) {
+                return;
+            }
+            process.destroyForcibly();
+            process.waitFor(hardMs, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void deleteTreeWithRetries(Path root) {
+        if (root == null) {
+            return;
+        }
+        final int maxTries = 5;
+        for (int attempt = 1; attempt <= maxTries; attempt++) {
+            try {
+                if (!Files.exists(root)) {
+                    return;
+                }
+                Files.walkFileTree(root, new SimpleFileVisitor<>() {
+                    @Override
+                    public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                        Files.deleteIfExists(file);
+                        return FileVisitResult.CONTINUE;
+                    }
+
+                    @Override
+                    public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
+                        Files.deleteIfExists(dir);
+                        return FileVisitResult.CONTINUE;
+                    }
+                });
+                if (!Files.exists(root)) {
+                    return;
+                }
+            } catch (IOException ignored) {
+            }
+            try {
+                Thread.sleep(200L * attempt);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+        logger.warn("Leftovers remain under {}", root);
+    }
+
+    private void runAsync(Runnable task) {
+        if (task == null) {
+            return;
+        }
+        if (shuttingDown.get()) {
+            task.run();
+            return;
+        }
+        try {
+            executor.submit(task);
+        } catch (RejectedExecutionException ex) {
+            task.run();
+        }
+    }
+
+    private void cleanupSession(Player player, ServerSession session) {
+        if (session == null) {
+            return;
+        }
+        if (!session.cleaned.compareAndSet(false, true)) {
+            return;
+        }
+
+        try {
+            session.connecting = false;
+            killProcess(session.process, 3_000, 4_000);
+            safeUnregister(session.info);
+            deleteTreeWithRetries(session.folder);
+        } catch (Throwable t) {
+            logger.error("Error cleaning up server {}", session.name, t);
         } finally {
-            for (UUID m : session.members) leaderOfMember.remove(m);
-            platformInitialized.remove(session.name);
             if (session.leader != null) {
                 sessionsByLeader.remove(session.leader, session);
                 visitRadius.remove(session.leader);
                 moveRadius.remove(session.leader);
             }
+            for (UUID member : session.members) {
+                if (session.leader != null) {
+                    leaderOfMember.remove(member, session.leader);
+                } else {
+                    leaderOfMember.remove(member);
+                }
+            }
+            session.members.clear();
+            platformInitialized.remove(session.name);
             warmPool.remove(session);
         }
     }
 
     private void cleanupAllSessions() {
-        Set<ServerSession> unique = Collections.newSetFromMap(new ConcurrentHashMap<>());
-        unique.addAll(sessionsByLeader.values());
-        unique.addAll(warmPool);
+        Set<ServerSession> toClean = Collections.newSetFromMap(new ConcurrentHashMap<>());
+        toClean.addAll(sessionsByLeader.values());
+        toClean.addAll(warmPool);
 
-        for (ServerSession session : unique) {
-            if (session == null) {
-                continue;
+        List<Callable<Void>> tasks = new ArrayList<>();
+        for (ServerSession session : toClean) {
+            if (session != null) {
+                tasks.add(() -> {
+                    cleanupSession(null, session);
+                    return null;
+                });
             }
+        }
+
+        if (!tasks.isEmpty()) {
+            ExecutorService janitor = Executors.newFixedThreadPool(Math.min(4, Math.max(1, tasks.size())));
             try {
-                cleanupSession(null, session);
-            } catch (Exception ex) {
-                logger.warn("Error while cleaning session {} during shutdown", session.name, ex);
+                List<Future<Void>> futures = janitor.invokeAll(tasks);
+                for (Future<Void> future : futures) {
+                    try {
+                        future.get(10, TimeUnit.SECONDS);
+                    } catch (Exception ignored) {
+                    }
+                }
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            } finally {
+                janitor.shutdownNow();
             }
         }
 
@@ -1380,27 +1481,27 @@ private ServerSession spawnWarm() {
             return;
         }
 
-        try (var paths = Files.walk(root)) {
-            paths.sorted(Comparator.reverseOrder())
-                    .filter(path -> !path.equals(root))
-                    .forEach(path -> {
-                        try {
-                            Files.deleteIfExists(path);
-                        } catch (IOException ex) {
-                            logger.warn("Failed to delete {} during shutdown cleanup", path, ex);
-                        }
-                    });
-        } catch (IOException ex) {
-            logger.warn("Unable to walk servers directory for cleanup", ex);
+        try (var stream = Files.list(root)) {
+            stream.forEach(child -> {
+                try {
+                    deleteTreeWithRetries(child);
+                } catch (Throwable t) {
+                    logger.warn("Leftover not fully deleted: {}", child);
+                }
+            });
+        } catch (IOException e) {
+            logger.warn("Unable to list servers directory for cleanup", e);
         }
 
         try {
-            if (Files.exists(root)) {
-                Files.deleteIfExists(root);
-            }
+            Files.delete(root);
+        } catch (IOException ignored) {
+        }
+
+        try {
             Files.createDirectories(root);
-        } catch (IOException ex) {
-            logger.warn("Unable to reset servers directory after cleanup", ex);
+        } catch (IOException e) {
+            logger.warn("Unable to ensure servers directory exists after cleanup", e);
         }
     }
 }

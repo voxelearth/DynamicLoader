@@ -22,6 +22,7 @@ import voxelearth.dynamicloader.net.RconClient;
 import voxelearth.dynamicloader.ui.NavigatorUI;
 import voxelearth.dynamicloader.ui.NavigatorUI.FamousPlace;
 import voxelearth.dynamicloader.ui.NavigatorUI.PartyAction;
+import voxelearth.dynamicloader.ui.NavigatorUI.QuickAction;
 import voxelearth.dynamicloader.ui.NavigatorUI.SettingsAction;
 
 import java.io.File;
@@ -29,10 +30,101 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
-import java.nio.file.FileVisitResult;
-import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Duration;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+/**
+ * Velocity-only DynamicLoader:
+ * - Slot 9 Navigator (client-side) + chest GUIs using Protocolize v2
+ * - Per-party world spawn, leader-first connect, auto-pull friends
+ * - Backend commands via RCON (fallback: clickable)
+ * - One-time void-proof platform on new worlds
+ */
+@Plugin(
+        id = "dynamicloader",
+        name = "DynamicLoader",
+        version = "1.6.2",
+        description = "Spawns per-party servers and provides GUI & lobby management from Velocity.",
+        dependencies = { @Dependency(id = "protocolize") }
+)
+public class DynamicLoader {
+
+    private final ProxyServer proxy;
+    private final ComponentLogger logger;
+
+    // One world per party leader
+    private final Map<UUID, ServerSession> sessionsByLeader = new ConcurrentHashMap<>();
+    private final Map<UUID, UUID> leaderOfMember = new ConcurrentHashMap<>();
+
+    // Settings state (tracked per leader on the proxy to support ±50 buttons)
+    private final Map<UUID, Integer> visitRadius = new ConcurrentHashMap<>();
+    private final Map<UUID, Integer> moveRadius  = new ConcurrentHashMap<>();
+    private static final int DEFAULT_RADIUS = 256;
+    private static final int RADIUS_STEP    = 50;
+    private static final int RADIUS_MIN     = 50;
+    private static final int RADIUS_MAX     = 1024;
+
+    private final ExecutorService executor = Executors.newCachedThreadPool();
+    private static final String LOBBY_NAME = "lobby";
+
+    private final PartyManager parties;
+    private final Set<String> platformInitialized = ConcurrentHashMap.newKeySet();
+    private final Deque<ServerSession> warmPool = new ConcurrentLinkedDeque<>();
+    private final ScheduledExecutorService warmKeeper = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "DynamicLoader-warm");
+        t.setDaemon(true);
+        return t;
+    });
+    private static final int WARM_BUFFER = 2;
+    private final AtomicBoolean shuttingDown = new AtomicBoolean(false);
+
+    private NavigatorUI nav;
+
+    @Inject
+    public DynamicLoader(ProxyServer proxy, ComponentLogger logger) {
+        this.proxy = proxy;
+        this.logger = logger;
+        this.parties = new PartyManager(proxy);
+
+        proxy.getCommandManager().register("earth", new VoxelearthCommand());
+        proxy.getCommandManager().register("lobby", new LobbyCommand());
+        proxy.getCommandManager().register("party", new PartyCommand());
+        proxy.getCommandManager().register("help", new HelpCommand()); // override help
+        proxy.getCommandManager().register("visit", new VisitCommand());
+        proxy.getCommandManager().register("visitradius", new VisitRadiusCommand());
+        proxy.getCommandManager().register("visitradiusother", new VisitRadiusOtherCommand());
+        proxy.getCommandManager().register("moveradius", new MoveRadiusCommand());
+        proxy.getCommandManager().register("moveradiusother", new MoveRadiusOtherCommand());
+        proxy.getCommandManager().register("moveload", new MoveLoadCommand());
+        proxy.getCommandManager().register("moveloadother", new MoveLoadOtherCommand());
+    }
+
+    /** Initialize Protocolize-driven UI after the proxy + dependencies are ready. */
+    @Subscribe
+    public void onProxyInit(ProxyInitializeEvent e) {
+        if (!protocolizeAvailable()) {
+            logger.error("Protocolize not found. Install protocolize-velocity (2.4.x) into the /plugins folder.");
+            return;
+        }
+        this.nav = new NavigatorUI(
+                List.of(
+                        new FamousPlace("Great Pyramids of Giza, Egypt",        "great pyramids of giza egypt"),
+                        new FamousPlace("Eiffel Tower, Paris France",           "eiffel tower paris"),
+                        new FamousPlace("Statue of Liberty, NYC USA",           "statue of liberty new york"),
+                        new FamousPlace("Taj Mahal, Agra India",                "taj mahal agra"),
+                        new FamousPlace("Sydney Opera House, Australia",        "sydney opera house"),
+                        new FamousPlace("Christ the Redeemer, Rio Brazil",      "christ the redeemer rio de janeiro"),
+                        new FamousPlace("Mount Everest Base Camp, Nepal",       "everest base camp nepal"),
+                        new FamousPlace("Grand Canyon South Rim, USA",          "grand canyon south rim"),
+                        new FamousPlace("Great Wall Mutianyu, China",           "great wall mutianyu"),
+                        new FamousPlace("Colosseum, Rome Italy",                "colosseum rome"),
+                        new FamousPlace("Machu Picchu, Peru",                   "machu picchu"),
+                        new FamousPlace("Burj Khalifa, Dubai UAE",              "burj khalifa dubai"),
+                        new FamousPlace("Golden Gate Bridge, San Francisco",    "golden gate bridge san francisco"),
+                        new FamousPlace("Big Ben, London UK",                   "big ben london"),
                         new FamousPlace("Niagara Falls, USA Canada",            "niagara falls"),
                         new FamousPlace("Santorini - Oia, Greece",              "oia santorini"),
                         new FamousPlace("Custom",                               ""),
@@ -53,6 +145,18 @@ import java.time.Duration;
                     public void onPartyAction(UUID playerId, PartyAction action) {
                         proxy.getPlayer(playerId).ifPresent(p -> handlePartyAction(p, action));
                     }
+
+                    @Override
+                    public void onQuickAction(UUID playerId, QuickAction action) {
+                        proxy.getPlayer(playerId).ifPresent(p -> {
+                            switch (action) {
+                                case GO_EARTH -> proxy.getCommandManager().executeAsync(p, "earth");
+                                case GO_LOBBY -> proxy.getCommandManager().executeAsync(p, "lobby");
+                            }
+                        });
+                    }
+
+
                 }
         );
         this.nav.installHooks(); // register onConstruct/onInteract

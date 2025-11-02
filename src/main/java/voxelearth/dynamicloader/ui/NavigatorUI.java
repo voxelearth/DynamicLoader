@@ -28,10 +28,17 @@ public final class NavigatorUI {
         CREATE_JOIN, INVITE_HELP, LEAVE, DISBAND
     }
 
+    /** New: quick buttons on the main menu */
+    public enum QuickAction {
+        GO_EARTH, GO_LOBBY
+    }
+
     public interface Callback {
         void onPlaceChosen(UUID playerId, FamousPlace place);
         void onSettingsAction(UUID playerId, SettingsAction action);
         void onPartyAction(UUID playerId, PartyAction action);
+        /** New: called when “Go to Earth / Go to Lobby” is clicked */
+        void onQuickAction(UUID playerId, QuickAction action);
     }
 
     private static final int NAV_HOTBAR_INDEX = 8;                    // 0..8
@@ -114,17 +121,23 @@ public final class NavigatorUI {
         Inventory inv = new Inventory(InventoryType.GENERIC_9X3);
         inv.title(ChatElement.ofLegacyText("Voxel Earth • Main"));
 
-        // Better icons
-        inv.item(11, named(ItemType.COMPASS, "§bFamous Places"));
-        inv.item(13, named(ItemType.REPEATER, "§bRadius & Settings"));
-        inv.item(15, named(ItemType.PLAYER_HEAD, "§bParty"));
+        // Nicely spaced row: 9,11,13,15,17
+        inv.item(9,  named(ItemType.GRASS_BLOCK,        "§aGo to Earth"));         // NEW
+        inv.item(11, named(ItemType.COMPASS,      "§bFamous Places"));
+        inv.item(13, named(ItemType.REPEATER,     "§bRadius & Settings"));
+        inv.item(15, named(ItemType.PLAYER_HEAD,  "§bParty"));
+        inv.item(17, named(ItemType.ENDER_PEARL,  "§aGo to Lobby"));          // NEW
 
         inv.onClick(click -> {
             try { click.cancelled(true); } catch (Throwable ignored) {}
             int slot = click.slot();
-            if (slot == 11) openPlaces(pp);
-            else if (slot == 13) openSettings(pp);
-            else if (slot == 15) openParty(pp);
+            UUID uid = pp.uniqueId();
+
+            if (slot == 9)  { cb.onQuickAction(uid, QuickAction.GO_EARTH); pp.closeInventory(); return; }
+            if (slot == 11) { openPlaces(pp); return; }
+            if (slot == 13) { openSettings(pp); return; }
+            if (slot == 15) { openParty(pp); return; }
+            if (slot == 17) { cb.onQuickAction(uid, QuickAction.GO_LOBBY); pp.closeInventory(); return; }
         });
 
         pp.openInventory(inv);
@@ -140,15 +153,9 @@ public final class NavigatorUI {
         Map<Integer, FamousPlace> slotToPlace = new HashMap<>();
         int slot = 0;
         for (FamousPlace place : places) {
-            if (slot >= MAX_SLOTS) {
-                break;
-            }
-            if (slot == BACK_SLOT) {
-                slot++;
-            }
-            if (slot >= MAX_SLOTS) {
-                break;
-            }
+            if (slot >= MAX_SLOTS) break;
+            if (slot == BACK_SLOT) slot++;
+            if (slot >= MAX_SLOTS) break;
 
             ItemType icon = iconFor(place.name());
             String displayName = (place.visitArg() == null || place.visitArg().isBlank())
@@ -223,8 +230,8 @@ public final class NavigatorUI {
         if (n.contains("big ben") || n.contains("westminster")) return ItemType.CLOCK;
         if (n.contains("niagara")) return ItemType.WATER_BUCKET;
         if (n.contains("santorini") || n.contains("oia")) return ItemType.BLUE_WOOL;
-    if (n.contains("custom")) return ItemType.BOOK;
-    if (n.contains("petra")) return ItemType.RED_SANDSTONE;
+        if (n.contains("custom")) return ItemType.BOOK;
+        if (n.contains("petra")) return ItemType.RED_SANDSTONE;
         if (n.contains("angkor")) return ItemType.COBBLESTONE;
         return ItemType.MAP;
     }

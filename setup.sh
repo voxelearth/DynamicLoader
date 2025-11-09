@@ -1,6 +1,21 @@
 #!/bin/bash
 set -e
 
+# Run apt-get as root when needed
+SUDO=""; [ "$EUID" -ne 0 ] && SUDO="sudo"
+
+confirm() {
+  # Usage: confirm "[?] message [Y/n]"
+  local prompt="${1:-Proceed? [Y/n]}"; local ans
+  if [ -t 0 ]; then
+    read -r -p "$prompt " ans
+    [[ -z "$ans" || "$ans" =~ ^[Yy]$ ]]
+  else
+    # Non-interactive (e.g., CI): default to "no"
+    return 1
+  fi
+}
+
 # --- Kill any processes using ports 25565 or 25566 ---
 echo "[*] Checking and freeing ports 25565 and 25566..."
 for port in 25565 25566; do
@@ -48,56 +63,91 @@ check_cuda() {
 # --- Ensure JDK is installed (21+ required for Velocity) ---
 check_jdk() {
   if ! command -v javac >/dev/null 2>&1; then
-    echo "[*] JDK not found. Installing OpenJDK 21..."
-    sudo apt update && sudo apt install -y openjdk-21-jdk
+    echo "[!] JDK not found (OpenJDK 21 required)."
+    if confirm "[?] Install OpenJDK 21 now? [Y/n]"; then
+      $SUDO apt-get update
+      $SUDO apt-get install -y openjdk-21-jdk
+    else
+      echo "[!] JDK 21 is required; aborting."
+      exit 1
+    fi
   else
     JDK_VERSION=$(javac -version 2>&1 | awk '{print $2}' | cut -d. -f1)
     if [ "$JDK_VERSION" -lt 21 ]; then
-      echo "[!] JDK version $JDK_VERSION found. Velocity requires JDK 21+."
-      read -p "[?] Reinstall OpenJDK 21? [Y/n] " yn
-      case "$yn" in
-        [Yy]*|"" ) sudo apt install -y openjdk-21-jdk ;;
-        * ) echo "[!] Skipping JDK reinstall." ;;
-      esac
+      echo "[!] JDK version $JDK_VERSION found; Velocity requires 21+."
+      if confirm "[?] Install OpenJDK 21 now? [Y/n]"; then
+        $SUDO apt-get install -y openjdk-21-jdk
+      else
+        echo "[!] Continuing with existing JDK (may fail)."
+      fi
     else
       echo "[✓] JDK version $JDK_VERSION OK"
     fi
   fi
 }
 
-# --- Ensure basic system dependencies (auto-install if missing) ---
+# --- Ensure basic system dependencies (prompt before install) ---
 install_deps() {
   echo "[*] Checking core system dependencies..."
-  for dep in unzip jq curl maven python3 python3-pip npm; do
-    if ! command -v $dep >/dev/null 2>&1; then
-      echo "[*] Installing missing dependency: $dep"
-      sudo apt update && sudo apt install -y $dep
+
+  # Map commands to apt packages to avoid reinstalling existing deps
+  declare -A need=(
+    [unzip]=unzip
+    [jq]=jq
+    [curl]=curl
+    [mvn]=maven
+    [python3]=python3
+    [pip3]=python3-pip
+    [npm]=npm
+  )
+
+  missing_pkgs=()
+  for cmd in "${!need[@]}"; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      echo "    - $cmd missing (needs ${need[$cmd]})"
+      missing_pkgs+=("${need[$cmd]}")
     else
-      echo "[✓] $dep found"
+      echo "[✓] $cmd found"
     fi
   done
+
+  if [ ${#missing_pkgs[@]} -eq 0 ]; then
+    return
+  fi
+
+  echo "[!] Missing packages: ${missing_pkgs[*]}"
+  if confirm "[?] Install these now via apt-get? [Y/n]"; then
+    $SUDO apt-get update
+    $SUDO apt-get install -y --no-install-recommends "${missing_pkgs[@]}"
+    echo "[✓] System dependencies installed."
+  else
+    echo "[!] Cannot continue without: ${missing_pkgs[*]}"
+    exit 1
+  fi
 }
 
 # --- Check Node.js version (warn and prompt if too old) ---
 check_node() {
   if ! command -v node >/dev/null 2>&1; then
-    echo "[*] Node.js not found. Installing latest LTS via apt (may be old)..."
-    sudo apt update && sudo apt install -y nodejs npm
+    echo "[!] Node.js not found."
+    if confirm "[?] Install Node.js + npm via apt-get? [Y/n]"; then
+      $SUDO apt-get update
+      $SUDO apt-get install -y nodejs npm
+    else
+      echo "[!] Skipping Node.js install."
+    fi
   else
-    NODE_VERSION=$(node -v | sed 's/v//; s/\..*//')
-    if [ "$NODE_VERSION" -lt 14 ]; then
+    NODE_MAJOR=$(node -v | sed 's/^v//; s/\..*$//')
+    if [ "$NODE_MAJOR" -lt 14 ]; then
       echo "[!] Node.js version $(node -v) is too old for modern JS (needs >=14)."
-      read -p "[?] Replace with modern version via NVM? [Y/n] " yn
-      case "$yn" in
-        [Yy]*|"" )
-          echo "[*] Installing NVM and latest LTS Node.js..."
-          curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-          export NVM_DIR="$HOME/.nvm"
-          [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-          nvm install --lts
-          ;;
-        * ) echo "[!] Skipping Node.js update." ;;
-      esac
+      if confirm "[?] Install latest LTS via NVM now? [Y/n]"; then
+        curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+        export NVM_DIR="$HOME/.nvm"
+        [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+        nvm install --lts
+      else
+        echo "[!] Continuing with existing Node.js (may fail)."
+      fi
     else
       echo "[✓] Node.js version $(node -v) OK"
     fi

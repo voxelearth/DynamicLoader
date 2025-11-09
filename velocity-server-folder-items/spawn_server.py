@@ -181,7 +181,7 @@ def main():
         setprop(props, "enable-rcon", "true")
         setprop(props, "rcon.port", str(args.rcon_port))
         setprop(props, "rcon.password", args.rcon_pass)
-    setprop(props, "view-distance", "6")
+    setprop(props, "view-distance", "32")
     setprop(props, "simulation-distance", "6")
     write_props(prop_path, props)
     print(f"[✓] Wrote {prop_path}")

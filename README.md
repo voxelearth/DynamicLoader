@@ -4,8 +4,10 @@
 A **Velocity** proxy plugin that spins Minecraft servers up/down on demand for Voxel Earth.
 
 ## Auto-setup (recommended)
-**Just want a Voxel Earth server? Set up easily!**
+**Just want a Voxel Earth server? Set up easily! (Needs WSL2/NVIDIA GPU)**
 ```bash
+git clone https://github.com/voxelearth/dynamicloader
+cd dynamicloader
 ./setup.sh
 ```
 This script provisions a Velocity instance, a lobby, and wires in this plugin for a quick test drive.

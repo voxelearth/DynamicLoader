@@ -1,3 +1,13 @@
+> **To Do List**
+>
+> Players should be OP when they go to their personal Earths
+>
+> View distance stuck at 6 and not 32 in personal worlds
+>
+> Bug: Interacting with anything opens the Navigator
+>
+> Feel free to open a pull request patching any of these!
+
 # Voxel Earth — DynamicLoader (Velocity)
 **VoxelEarth monorepo with consistent versions:** https://github.com/ryanhlewis/VoxelEarth
 

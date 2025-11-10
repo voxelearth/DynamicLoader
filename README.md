@@ -1,9 +1,5 @@
 > **To Do List**
 >
-> Players should be OP when they go to their personal Earths
->
-> View distance stuck at 6 and not 32 in personal worlds
->
 > Bug: Interacting with anything opens the Navigator
 >
 > Feel free to open a pull request patching any of these!
@@ -21,6 +17,13 @@ cd dynamicloader
 ./setup.sh
 ```
 This script provisions a Velocity instance, a lobby, and wires in this plugin for a quick test drive.
+
+Just want a single server and not the whole Velocity multi world?
+```
+git clone https://github.com/voxelearth/dynamicloader
+cd dynamicloader
+./setupsingle.sh
+```
 
 ## Build from source
 ```bash

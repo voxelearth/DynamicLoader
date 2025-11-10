@@ -198,6 +198,11 @@ def main():
         except Exception:
             pass
 
+    # --- Flip Paper global: proxies.velocity.enabled -> true ---
+    pg = folder / 'config/paper-global.yml'
+    pg.write_text(__import__('re').sub(r'(?m)(^(\s*)velocity:\s*\n\2[ \t]+enabled:\s*)false\b', r'\1true', pg.read_text(encoding='utf-8')), encoding='utf-8')
+    print(f"[✓] Enabled Velocity support in {pg}")
+
     # sanity checks before boot
     jar_path = folder / args.jar
     if not jar_path.exists():

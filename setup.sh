@@ -156,9 +156,9 @@ check_node() {
 
 # --- Ensure Python packages are installed (auto-install if missing) ---
 install_python_packages() {
-  echo "[*] Checking Python packages: numpy, tqdm, requests"
+  echo "[*] Checking Python packages: numpy, tqdm, requests, urllib3"
   missing=()
-  for pkg in numpy tqdm requests; do
+  for pkg in numpy tqdm requests urllib3; do
     python3 -c "import $pkg" 2>/dev/null || missing+=($pkg)
   done
   if [ ${#missing[@]} -gt 0 ]; then
@@ -187,6 +187,7 @@ LOBBY_ZIP="$ROOT_DIR/velocity-server-folder-items/lobby.zip"
 FORWARD_SECRET="$ROOT_DIR/velocity-server-folder-items/forwarding.secret"
 SPAWN_SCRIPT="$ROOT_DIR/velocity-server-folder-items/spawn_server.py"
 VELOCITY_TOML="$ROOT_DIR/velocity-server-folder-items/velocity.toml"
+SERVER_ICON="$ROOT_DIR/velocity-server-folder-items/server-icon.png"
 PROTOCOLIZE_JAR="$ROOT_DIR/velocity-server-folder-items/protocolize-velocity.jar"
 
 echo "[*] Setting up Velocity + Voxelearth server..."
@@ -235,18 +236,38 @@ if [ -d "$PLUGINS_DIR" ]; then
   find "$PLUGINS_DIR" -type f -name "VoxelEarth.jar" -delete
 fi
 
-# --- Modify port ---
-echo "[*] Setting server.properties port to 25566..."
-SERVER_PROPS="$SERVER_DIR/server.properties"
-if [ -f "$SERVER_PROPS" ]; then
-  sed -i.bak 's/^server-port=.*/server-port=25566/' "$SERVER_PROPS"
-else
-  echo "server-port=25566" > "$SERVER_PROPS"
+# --- Delete SecureAutoOP-1.1.jar from plugins ---
+echo "[*] Removing SecureAutoOP-1.1.jar from lobby server..."
+if [ -d "$PLUGINS_DIR" ]; then
+  find "$PLUGINS_DIR" -type f -name "SecureAutoOP-1.1.jar" -delete
 fi
 
+# --- Delete FAWE from plugins ---
+echo "[*] Removing FAWE from lobby server..."
+if [ -d "$PLUGINS_DIR" ]; then
+  find "$PLUGINS_DIR" -type f -name "FastAsyncWorldEdit-*.jar" -delete
+fi
+
+# --- Set server port and spawn protection together ---
+echo "[*] Ensuring server-port=25566 and spawn-protection=1024..."
+SERVER_PROPS="$SERVER_DIR/server.properties"
+touch "$SERVER_PROPS"
+
+# replace if present
+sed -i.bak \
+  -e 's/^server-port=.*/server-port=25566/' \
+  -e 's/^spawn-protection=.*/spawn-protection=1024/' \
+  "$SERVER_PROPS"
+
+# append if missing
+grep -q '^server-port=' "$SERVER_PROPS" || echo 'server-port=25566' >> "$SERVER_PROPS"
+grep -q '^spawn-protection=' "$SERVER_PROPS" || echo 'spawn-protection=1024' >> "$SERVER_PROPS"
+
+echo "[✓] Updated $SERVER_PROPS (backup at server.properties.bak)"
+
 # --- Copy extra files ---
-echo "[*] Copying forwarding.secret, spawn_server.py, voxelearth.zip, and velocity.toml..."
-cp "$FORWARD_SECRET" "$SPAWN_SCRIPT" "$ZIP_PATH" "$VELOCITY_TOML" "$VELOCITY_DIR/"
+echo "[*] Copying forwarding.secret, spawn_server.py, voxelearth.zip, server icon, and velocity.toml..."
+cp "$FORWARD_SECRET" "$SPAWN_SCRIPT" "$ZIP_PATH" "$SERVER_ICON" "$VELOCITY_TOML" "$VELOCITY_DIR/"
 
 # --- Update velocity.toml with correct Windows IP ---
 # WINDOWS_IP=$(ip route | grep -i default | awk '{print $3}')
@@ -280,6 +301,18 @@ cp "$DYNAMIC_LOADER_JAR_PATH" "$VELOCITY_DIR/plugins/"
 
 echo "[*] Copying Protocolize jar to Velocity plugins..."
 cp "$PROTOCOLIZE_JAR" "$VELOCITY_DIR/plugins/"
+
+# --- Flip Paper global: proxies.velocity.enabled -> true ---
+PAPER_GLOBAL="$SERVER_DIR/config/paper-global.yml"
+if [ -f "$PAPER_GLOBAL" ]; then
+  # Limit to the proxies -> velocity block, then switch only the enabled line
+  sed -i -E '/^[[:space:]]*proxies:[[:space:]]*$/,/^[^[:space:]]/ {
+    /^[[:space:]]*velocity:[[:space:]]*$/,/^[[:space:]]{2}[a-zA-Z_-]+:/ s/^([[:space:]]*enabled:[[:space:]]*)false([[:space:]]*)$/\1true\2/
+  }' "$PAPER_GLOBAL"
+  echo "[*] Enabled Velocity support in $PAPER_GLOBAL"
+else
+  echo "[!] paper-global.yml not found at $PAPER_GLOBAL"
+fi
 
 # --- Ensure Windows has Java ---
 echo "[*] Checking if Java exists on Windows PATH..."

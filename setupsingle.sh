@@ -96,8 +96,6 @@ install_deps() {
     [jq]=jq
     [curl]=curl
     [mvn]=maven
-    [python3]=python3
-    [pip3]=python3-pip
     [npm]=npm
   )
 
@@ -154,26 +152,10 @@ check_node() {
   fi
 }
 
-# --- Ensure Python packages are installed (auto-install if missing) ---
-install_python_packages() {
-  echo "[*] Checking Python packages: numpy, tqdm, requests, urllib3"
-  missing=()
-  for pkg in numpy tqdm requests urllib3; do
-    python3 -c "import $pkg" 2>/dev/null || missing+=($pkg)
-  done
-  if [ ${#missing[@]} -gt 0 ]; then
-    echo "[*] Installing missing Python packages: ${missing[*]}"
-    pip3 install --user "${missing[@]}"
-  else
-    echo "[✓] All Python packages present"
-  fi
-}
-
 # --- Run all checks ---
 check_jdk
 install_deps
 check_node
-install_python_packages
 
 # --- Configuration ---
 ROOT_DIR="$(pwd)"
@@ -223,7 +205,7 @@ fi
 # --- Accept the EULA (non-interactive startup) ---
 echo "eula=true" > "$SERVER_DIR/eula.txt"
 
-# --- Make cuda_voxelizer executable if present (from Python script logic) ---
+# --- Make cuda_voxelizer executable if present ---
 CUDA_DIR="$SERVER_DIR/cuda_voxelizer"
 if [ -e "$CUDA_DIR" ]; then
   echo "[*] Making cuda_voxelizer writable/executable (chmod -R 777)..."
@@ -240,7 +222,7 @@ fi
 echo "[*] Starting Paper (Voxelearth) on port 25569..."
 cd "$SERVER_DIR"
 
-# Aikar-style JVM flags from the Python script
+# Aikar-style JVM flags
 JAVA_FLAGS=(
   "-Xms${XMS}" "-Xmx${XMX}"
   "-XX:+UseG1GC" "-XX:+ParallelRefProcEnabled" "-XX:MaxGCPauseMillis=100"
@@ -250,7 +232,6 @@ JAVA_FLAGS=(
   "-XX:+AlwaysPreTouch" "-XX:+PerfDisableSharedMem" "-Daikars.new.flags=true"
 )
 
-# Run with log, mirror Python's server.log behavior
 java "${JAVA_FLAGS[@]}" -jar "$SERVER_JAR"
 
 echo "[✓] Paper server started successfully."

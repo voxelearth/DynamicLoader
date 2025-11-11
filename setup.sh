@@ -96,8 +96,6 @@ install_deps() {
     [jq]=jq
     [curl]=curl
     [mvn]=maven
-    [python3]=python3
-    [pip3]=python3-pip
     [npm]=npm
   )
 
@@ -154,26 +152,10 @@ check_node() {
   fi
 }
 
-# --- Ensure Python packages are installed (auto-install if missing) ---
-install_python_packages() {
-  echo "[*] Checking Python packages: numpy, tqdm, requests, urllib3"
-  missing=()
-  for pkg in numpy tqdm requests urllib3; do
-    python3 -c "import $pkg" 2>/dev/null || missing+=($pkg)
-  done
-  if [ ${#missing[@]} -gt 0 ]; then
-    echo "[*] Installing missing Python packages: ${missing[*]}"
-    pip3 install --user "${missing[@]}"
-  else
-    echo "[✓] All Python packages present"
-  fi
-}
-
 # --- Run all checks ---
 check_jdk
 install_deps
 check_node
-install_python_packages
 
 # --- Configuration ---
 PROJECT="velocity"

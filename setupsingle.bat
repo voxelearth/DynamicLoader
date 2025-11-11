@@ -65,40 +65,6 @@ echo [*] Installing Node.js LTS via winget...
 winget install --id OpenJS.NodeJS.LTS -e --source winget --silent >nul 2>nul
 :AFTER_NODE
 
-REM --------------------------- Python ------------------------------------------
-echo [*] Checking Python 3...
-set "PY_CMD="
-where py >nul 2>nul && set "PY_CMD=py -3"
-if not defined PY_CMD ( where python  >nul 2>nul && set "PY_CMD=python" )
-if not defined PY_CMD ( where python3 >nul 2>nul && set "PY_CMD=python3" )
-
-if not defined PY_CMD (
-  where winget >nul 2>nul || (
-    echo [!] Python 3 not found and winget unavailable. Install Python 3 from https://www.python.org/
-    goto :AFTER_PY
-  )
-  echo [*] Installing Python 3.11 via winget...
-  winget install -e --id Python.Python.3.11 --silent >nul 2>nul
-  set "PY_CMD="
-  where py >nul 2>nul && set "PY_CMD=py -3"
-  if not defined PY_CMD ( where python  >nul 2>nul && set "PY_CMD=python" )
-  if not defined PY_CMD ( where python3 >nul 2>nul && set "PY_CMD=python3" )
-  if not defined PY_CMD (
-    echo [!] Could not find Python after install; continuing without Python packages.
-    goto :AFTER_PY
-  )
-)
-
-echo [OK] Using %PY_CMD%
-for /f "delims=" %%V in ('%PY_CMD% --version 2^>^&1') do echo     %%V
-echo [*] Ensuring pip and packages...
-%PY_CMD% -m ensurepip --upgrade >nul 2>nul
-%PY_CMD% -m pip3 --version >nul 2>nul || %PY_CMD% -m ensurepip --upgrade >nul 2>nul
-%PY_CMD% -m pip3 install --upgrade pip >nul 2>nul
-%PY_CMD% -m pip3 install --user --upgrade numpy tqdm requests urllib3 >nul 2>nul
-
-:AFTER_PY
-
 REM --------------------------- Java 17+ ----------------------------------------
 echo [*] Checking Java (JRE 17+)...
 where java >nul 2>nul && goto :JAVA_FOUND

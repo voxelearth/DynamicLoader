@@ -16,9 +16,9 @@ confirm() {
   fi
 }
 
-# --- Kill any processes using ports 25565 or 25566 ---
-echo "[*] Checking and freeing ports 25565 and 25566..."
-for port in 25565 25569; do
+# --- Kill any processes using ports 25568 or 25569 ---
+echo "[*] Checking and freeing ports 25568 and 25569..."
+for port in 25568 25569; do
   pid=$(sudo lsof -ti:$port || true)
   if [ -n "$pid" ]; then
     echo "    Killing process on port $port (PID $pid)..."
@@ -237,7 +237,7 @@ if [ ! -f "$SERVER_DIR/$SERVER_JAR" ]; then
 fi
 
 # --- Start Paper directly (no proxy); background with log file ---
-echo "[*] Starting Paper (Voxelearth) on port 25565..."
+echo "[*] Starting Paper (Voxelearth) on port 25569..."
 cd "$SERVER_DIR"
 
 # Aikar-style JVM flags from the Python script

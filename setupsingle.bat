@@ -49,22 +49,6 @@ for %%P in (25568 25569) do (
   )
 )
 
-REM --------------------------- Node.js -----------------------------------------
-echo [*] Checking Node.js...
-where node >nul 2>nul || goto :NODE_INSTALL
-for /f %%A in ('node -v') do set "NODE_VER_STR=%%A"
-echo [OK] Node.js %NODE_VER_STR% detected; not upgrading.
-goto :AFTER_NODE
-
-:NODE_INSTALL
-where winget >nul 2>nul || (
-  echo [!] Node.js not found and winget unavailable. Install Node.js LTS from https://nodejs.org/
-  goto :AFTER_NODE
-)
-echo [*] Installing Node.js LTS via winget...
-winget install --id OpenJS.NodeJS.LTS -e --source winget --silent >nul 2>nul
-:AFTER_NODE
-
 REM --------------------------- Java 17+ ----------------------------------------
 echo [*] Checking Java (JRE 17+)...
 where java >nul 2>nul && goto :JAVA_FOUND

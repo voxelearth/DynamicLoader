@@ -26,40 +26,6 @@ for port in 25565 25566; do
   fi
 done
 
-# --- Check for CUDA Toolkit 11 ---
-check_cuda() {
-  echo "[*] Checking for CUDA Toolkit 11..."
-  if command -v nvcc >/dev/null 2>&1; then
-    CUDA_VERSION=$(nvcc --version | grep -oP "release \K[0-9]+\.[0-9]+" || echo "0")
-    if [[ "$CUDA_VERSION" == 11.* ]]; then
-      echo "[✓] CUDA Toolkit $CUDA_VERSION detected."
-      return
-    else
-      echo "[!] CUDA version $CUDA_VERSION detected — expected 11.x."
-    fi
-  else
-    echo "[!] CUDA Toolkit not found."
-  fi
-
-  read -p "[?] Install CUDA Toolkit 11.0.2 now? [Y/n] " yn
-  case "$yn" in
-    [Yy]*|"" )
-      echo "[*] Installing CUDA Toolkit 11.0.2..."
-      sudo apt update
-      sudo apt install -y gcc-9 g++-9
-      sudo ln -sf /usr/bin/gcc-9 /usr/bin/gcc
-      sudo ln -sf /usr/bin/g++-9 /usr/bin/g++
-      wget -q http://developer.download.nvidia.com/compute/cuda/11.0.2/local_installers/cuda_11.0.2_450.51.05_linux.run -O cuda_installer.run
-      sudo sh cuda_installer.run --silent --toolkit
-      rm -f cuda_installer.run
-      echo "[✓] CUDA Toolkit 11.0.2 installed successfully."
-      ;;
-    * )
-      echo "[!] Skipping CUDA installation. CUDA-dependent features may fail."
-      ;;
-  esac
-}
-
 # --- Ensure JDK is installed (21+ required for Velocity) ---
 check_jdk() {
   if ! command -v javac >/dev/null 2>&1; then
@@ -96,7 +62,6 @@ install_deps() {
     [jq]=jq
     [curl]=curl
     [mvn]=maven
-    [npm]=npm
   )
 
   missing_pkgs=()
@@ -124,38 +89,9 @@ install_deps() {
   fi
 }
 
-# --- Check Node.js version (warn and prompt if too old) ---
-check_node() {
-  if ! command -v node >/dev/null 2>&1; then
-    echo "[!] Node.js not found."
-    if confirm "[?] Install Node.js + npm via apt-get? [Y/n]"; then
-      $SUDO apt-get update
-      $SUDO apt-get install -y nodejs npm
-    else
-      echo "[!] Skipping Node.js install."
-    fi
-  else
-    NODE_MAJOR=$(node -v | sed 's/^v//; s/\..*$//')
-    if [ "$NODE_MAJOR" -lt 14 ]; then
-      echo "[!] Node.js version $(node -v) is too old for modern JS (needs >=14)."
-      if confirm "[?] Install latest LTS via NVM now? [Y/n]"; then
-        curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-        export NVM_DIR="$HOME/.nvm"
-        [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-        nvm install --lts
-      else
-        echo "[!] Continuing with existing Node.js (may fail)."
-      fi
-    else
-      echo "[✓] Node.js version $(node -v) OK"
-    fi
-  fi
-}
-
 # --- Run all checks ---
 check_jdk
 install_deps
-check_node
 
 # --- Configuration ---
 PROJECT="velocity"

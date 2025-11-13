@@ -79,8 +79,10 @@ def ensure_base_from_zip(zip_path: pathlib.Path, base_dir: pathlib.Path):
                             shutil.copyfileobj(src, dst)
                         # preserve timestamp (best effort)
                         date_time = m.date_time + (0, 0, -1)
-                        try: os.utime(target, (time.time(), time.mktime(date_time)))
-                        except Exception: pass
+                        try:
+                            os.utime(target, (time.time(), time.mktime(date_time)))
+                        except Exception:
+                            pass
 
             # If base dir is empty, move it into place; otherwise, copy files over (idempotent)
             try:
@@ -100,10 +102,12 @@ def ensure_base_from_zip(zip_path: pathlib.Path, base_dir: pathlib.Path):
                             shutil.copy2(src, dst)
 
         ready.write_text("ok\n", encoding="utf-8")
-        print("[✓] Base ready.")
+        print("[OK] Base ready.")
     finally:
-        try: lock.unlink()
-        except Exception: pass
+        try:
+            lock.unlink()
+        except Exception:
+            pass
 
 def _hardlink_or_copy(src: pathlib.Path, dst: pathlib.Path):
     try:
@@ -184,12 +188,12 @@ def main():
     setprop(props, "view-distance", "32")
     setprop(props, "simulation-distance", "6")
     write_props(prop_path, props)
-    print(f"[✓] Wrote {prop_path}")
+    print(f"[OK] Wrote {prop_path}")
 
     eula_path = folder / "eula.txt"
     if not eula_path.exists():
         eula_path.write_text("eula=true\n", encoding="utf-8")
-        print(f"[✓] Accepted EULA at {eula_path}")
+        print(f"[OK] Accepted EULA at {eula_path}")
 
     cuda_path = folder / "cuda_voxelizer"
     if cuda_path.exists() and os.name != "nt":
@@ -199,9 +203,22 @@ def main():
             pass
 
     # --- Flip Paper global: proxies.velocity.enabled -> true ---
-    pg = folder / 'config/paper-global.yml'
-    pg.write_text(__import__('re').sub(r'(?m)(^(\s*)velocity:\s*\n\2[ \t]+enabled:\s*)false\b', r'\1true', pg.read_text(encoding='utf-8')), encoding='utf-8')
-    print(f"[✓] Enabled Velocity support in {pg}")
+    pg = folder / "config/paper-global.yml"
+    if pg.exists():
+        import re
+        text = pg.read_text(encoding="utf-8")
+        new_text = re.sub(
+            r"(?m)(^(\s*)velocity:\s*\n\2[ \t]+enabled:\s*)false\b",
+            r"\1true",
+            text,
+        )
+        if new_text != text:
+            pg.write_text(new_text, encoding="utf-8")
+            print(f"[OK] Enabled Velocity support in {pg}")
+        else:
+            print(f"[=] Velocity already enabled in {pg}")
+    else:
+        print(f"[!] {pg} not found; skipping Velocity enable toggle")
 
     # sanity checks before boot
     jar_path = folder / args.jar
@@ -213,15 +230,29 @@ def main():
     log_path = folder / "server.log"
 
     java_cmd = [args.java]
-    if args.xms: java_cmd.append(f"-Xms{args.xms}")
-    if args.xmx: java_cmd.append(f"-Xmx{args.xmx}")
+    if args.xms:
+        java_cmd.append(f"-Xms{args.xms}")
+    if args.xmx:
+        java_cmd.append(f"-Xmx{args.xmx}")
     java_cmd += [
-        "-XX:+UseG1GC","-XX:+ParallelRefProcEnabled","-XX:MaxGCPauseMillis=100",
-        "-XX:+UnlockExperimentalVMOptions","-XX:G1NewSizePercent=20","-XX:G1MaxNewSizePercent=30",
-        "-XX:G1HeapRegionSize=4M","-XX:G1ReservePercent=15","-XX:InitiatingHeapOccupancyPercent=20",
-        "-XX:G1MixedGCLiveThresholdPercent=85","-XX:MaxTenuringThreshold=1","-XX:+DisableExplicitGC",
-        "-XX:+AlwaysPreTouch","-XX:+PerfDisableSharedMem","-Daikars.new.flags=true",
-        "-jar", args.jar, "--nogui",
+        "-XX:+UseG1GC",
+        "-XX:+ParallelRefProcEnabled",
+        "-XX:MaxGCPauseMillis=100",
+        "-XX:+UnlockExperimentalVMOptions",
+        "-XX:G1NewSizePercent=20",
+        "-XX:G1MaxNewSizePercent=30",
+        "-XX:G1HeapRegionSize=4M",
+        "-XX:G1ReservePercent=15",
+        "-XX:InitiatingHeapOccupancyPercent=20",
+        "-XX:G1MixedGCLiveThresholdPercent=85",
+        "-XX:MaxTenuringThreshold=1",
+        "-XX:+DisableExplicitGC",
+        "-XX:+AlwaysPreTouch",
+        "-XX:+PerfDisableSharedMem",
+        "-Daikars.new.flags=true",
+        "-jar",
+        args.jar,
+        "--nogui",
     ]
 
     print(f"[*] Launching Paper: {' '.join(java_cmd)}  (cwd={folder})")

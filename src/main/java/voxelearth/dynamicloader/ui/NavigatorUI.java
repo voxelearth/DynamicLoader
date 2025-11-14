@@ -71,15 +71,32 @@ public final class NavigatorUI {
             // Lock & re-assert slot 9 forever
             startGuard(pp);
 
-            // Right-click with our star opens the main menu
+            // Right-click with the Navigator (slot 9) in main-hand and not on a block opens the menu.
             pp.onInteract(interact -> {
-                PlayerInventory inv = pp.proxyInventory();
-                BaseItemStack stack = safeItem(inv, NAV_MC_SLOT_ID);
-                if (stack != null && stack.itemType() == ItemType.NETHER_STAR) {
-                    try { interact.cancelled(true); } catch (Throwable ignored) {}
-                    openMain(pp);
+                // ignore interactions that target a block — we only want right‑clicks in the air
+                if (interact.clickedBlockPosition() != null) {
+                    return;
                 }
+
+                PlayerInventory inv = pp.proxyInventory();
+                BaseItemStack star = safeItem(inv, NAV_MC_SLOT_ID);
+                // only proceed if the star is actually present in slot 9
+                if (star == null || star.itemType() != ItemType.NETHER_STAR) {
+                    return;
+                }
+
+                // ensure it’s the main hand (ignore off‑hand interactions)
+                if (interact.hand() != dev.simplix.protocolize.api.Hand.MAIN_HAND) {
+                    return;
+                }
+
+                try {
+                    interact.cancelled(true); // suppress the default use behaviour
+                } catch (Throwable ignored) {}
+
+                openMain(pp);
             });
+
         });
     }
 

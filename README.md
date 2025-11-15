@@ -56,3 +56,35 @@ Start Velocity as usual. DynamicLoader will bring backend servers up when player
 - Broader Voxel Earth pipeline & upstream authors:
   **ForceFlow** (cuda_voxelizer & TriMesh2), **Lucas Dower** (ObjToSchematic),
   **Cesium / Google** (3D Tiles), **Omar Shehata** (viewer inspiration).
+
+## Docker options
+
+### Build the full DynamicLoader network locally
+Use this path when you want the Velocity proxy, lobby, and on-demand subservers exactly as this repo defines them.
+
+```bash
+git clone https://github.com/voxelearth/dynamicloader.git
+cd dynamicloader
+docker build -t dynamicloader .
+docker run -it --rm -p 25565:25565 -p 25566:25566 dynamicloader
+```
+
+The image runs `setup.sh` during build, then launches both the lobby Paper server and the Velocity proxy when you `docker run` it. Any edits you make locally are picked up on the next `docker build`.
+
+### Build straight from GitHub
+If you prefer to skip cloning altogether, let Docker pull the repo as the build context:
+
+```bash
+docker build -t dynamicloader https://github.com/voxelearth/dynamicloader.git
+docker run -it --rm -p 25565:25565 -p 25566:25566 dynamicloader
+```
+
+### Just want a single Voxel Earth Paper server?
+The full DynamicLoader network is overkill if you only need one Paper instance with the Voxel Earth plugin preloaded. Use the upstream single-server project instead:
+
+```bash
+docker build -t voxelearth https://github.com/ryanhlewis/voxelearth.git
+docker run -it --rm -p 25565:25565 voxelearth
+```
+
+That repository contains the stand-alone Paper build tailored for single worlds, without the Velocity proxy or warm-pool orchestration.

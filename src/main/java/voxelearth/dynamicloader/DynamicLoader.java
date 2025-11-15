@@ -25,9 +25,9 @@ import voxelearth.dynamicloader.ui.NavigatorUI.PartyAction;
 import voxelearth.dynamicloader.ui.NavigatorUI.QuickAction;
 import voxelearth.dynamicloader.ui.NavigatorUI.SettingsAction;
 
-import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.BasicFileAttributes;
@@ -62,6 +62,7 @@ public class DynamicLoader {
     // Settings state (tracked per leader on the proxy to support ±50 buttons)
     private final Map<UUID, Integer> visitRadius = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> moveRadius  = new ConcurrentHashMap<>();
+    private final Map<UUID, Long> nextSessionAllowed = new ConcurrentHashMap<>();
     private static final int DEFAULT_RADIUS = 256;
     private static final int RADIUS_STEP    = 50;
     private static final int RADIUS_MIN     = 50;
@@ -79,7 +80,11 @@ public class DynamicLoader {
         return t;
     });
     private static final int WARM_BUFFER = 2;
+    private static final Path SERVERS_ROOT = Paths.get("servers");
+    private static final String SERVER_PID_FILENAME = ".server-pid";
+    private static final long SESSION_COOLDOWN_MS = TimeUnit.SECONDS.toMillis(45);
     private final AtomicBoolean shuttingDown = new AtomicBoolean(false);
+    private final String pythonExecutable;
 
     private NavigatorUI nav;
 
@@ -88,6 +93,7 @@ public class DynamicLoader {
         this.proxy = proxy;
         this.logger = logger;
         this.parties = new PartyManager(proxy);
+        this.pythonExecutable = detectPythonExecutable();
 
         proxy.getCommandManager().register("earth", new VoxelearthCommand());
         proxy.getCommandManager().register("lobby", new LobbyCommand());
@@ -162,23 +168,104 @@ public class DynamicLoader {
         this.nav.installHooks(); // register onConstruct/onInteract
         logger.info("Navigator UI initialized.");
 
-        warmKeeper.scheduleAtFixedRate(() -> {
-            try {
-                int target = Math.min(8, proxy.getAllPlayers().size() + WARM_BUFFER);
-                while (warmPool.size() < target) {
-                    ServerSession warm = spawnWarm();
-                    if (warm == null) {
-                        break;
-                    }
-                    warmPool.add(warm);
-                }
-                while (warmPool.size() > target) {
-                    shutdownWarm(warmPool.pollLast());
-                }
-            } catch (Throwable t) {
-                logger.warn("Warm pool upkeep failed", t);
+        warmKeeper.scheduleAtFixedRate(this::safeMaintainWarmPool, 0, 10, TimeUnit.SECONDS);
+    }
+
+    private void safeMaintainWarmPool() {
+        if (shuttingDown.get()) {
+            return;
+        }
+        try {
+            maintainWarmPool();
+        } catch (Throwable t) {
+            logger.warn("Warm pool upkeep failed", t);
+        }
+    }
+
+    private void maintainWarmPool() {
+        pruneDeadWarmServers();
+        int target = Math.min(8, proxy.getAllPlayers().size() + WARM_BUFFER);
+        while (warmPool.size() < target) {
+            ServerSession warm = spawnWarm();
+            if (warm == null) {
+                break;
             }
-        }, 0, 10, TimeUnit.SECONDS);
+            warmPool.add(warm);
+        }
+        while (warmPool.size() > target) {
+            shutdownWarm(warmPool.pollLast());
+        }
+    }
+
+    private boolean canStartNewSession(UUID leader) {
+        long now = System.currentTimeMillis();
+        return now >= nextSessionAllowed.getOrDefault(leader, 0L);
+    }
+
+    private long secondsUntilNextSession(UUID leader) {
+        long now = System.currentTimeMillis();
+        long allowed = nextSessionAllowed.getOrDefault(leader, 0L);
+        long diff = allowed - now;
+        if (diff <= 0) {
+            return 0;
+        }
+        return Math.max(1, TimeUnit.MILLISECONDS.toSeconds(diff));
+    }
+
+    private void recordSessionCreation(UUID leader) {
+        if (leader != null) {
+            nextSessionAllowed.put(leader, System.currentTimeMillis() + SESSION_COOLDOWN_MS);
+        }
+    }
+
+    private void clearSessionCooldown(UUID leader) {
+        if (leader != null) {
+            nextSessionAllowed.remove(leader);
+        }
+    }
+
+    private void requestWarmTopUp() {
+        if (shuttingDown.get()) {
+            return;
+        }
+        try {
+            warmKeeper.execute(this::safeMaintainWarmPool);
+        } catch (RejectedExecutionException ignored) {
+        }
+    }
+
+    private void pruneDeadWarmServers() {
+        Iterator<ServerSession> iter = warmPool.iterator();
+        while (iter.hasNext()) {
+            ServerSession warm = iter.next();
+            if (warm == null) {
+                iter.remove();
+                continue;
+            }
+            if (warm.cleaned.get()) {
+                iter.remove();
+                continue;
+            }
+            if (!isServerProcessAlive(warm)) {
+                iter.remove();
+                runAsync(() -> cleanupSession(null, warm));
+            }
+        }
+    }
+
+    private boolean isServerProcessAlive(ServerSession session) {
+        if (session == null) {
+            return false;
+        }
+        ProcessHandle handle = session.serverHandle;
+        if ((handle == null || !handle.isAlive()) && session.serverPid > 0) {
+            try {
+                handle = ProcessHandle.of(session.serverPid).orElse(null);
+                session.serverHandle = handle;
+            } catch (Exception ignored) {
+            }
+        }
+        return handle != null && handle.isAlive();
     }
 
     private boolean protocolizeAvailable() {
@@ -190,6 +277,15 @@ public class DynamicLoader {
         }
     }
 
+    private static String detectPythonExecutable() {
+        String osName = System.getProperty("os.name", "generic");
+        if (osName == null) {
+            return "python3";
+        }
+        String lower = osName.toLowerCase(Locale.ROOT);
+        return lower.contains("win") ? "python" : "python3";
+    }
+
     private static class ServerSession {
         String name;
         int port;
@@ -197,11 +293,14 @@ public class DynamicLoader {
         String rconPass;
         Process process;
         Path folder;
+        Path pidFile;
         ServerInfo info;
         boolean connecting = false;
         UUID leader;
         final Set<UUID> members = ConcurrentHashMap.newKeySet(); // includes leader
         final AtomicBoolean cleaned = new AtomicBoolean(false);
+        volatile long serverPid = -1L;
+        volatile ProcessHandle serverHandle;
     }
 
     // /help (override)
@@ -246,13 +345,22 @@ public class DynamicLoader {
                 return;
             }
 
+            if (!canStartNewSession(leader)) {
+                long waitSeconds = secondsUntilNextSession(leader);
+                player.sendMessage(Component.text("Hold on — your previous Earth is still closing. Try again in " + waitSeconds + "s.", NamedTextColor.YELLOW));
+                return;
+            }
+
             ServerSession warm = adoptWarmSession(leader, members);
             if (warm != null) {
-                player.sendMessage(Component.text("🌍 Connecting you to your personal Earth...", NamedTextColor.AQUA));
+                recordSessionCreation(leader);
+                player.sendMessage(Component.text("dYO? Connecting you to your personal Earth...", NamedTextColor.AQUA));
                 logger.info("[Session] Adopting warm server {} for leader {}", warm.name, leader);
                 executor.submit(() -> {
                     if (connectLeader(player, warm, true)) {
                         pullPartyMembers(warm);
+                    } else {
+                        clearSessionCooldown(leader);
                     }
                 });
                 return;
@@ -268,7 +376,8 @@ public class DynamicLoader {
             session.port = port;
             session.rconPort = rconPort;
             session.rconPass = rconPass;
-            session.folder = Paths.get("servers", name);
+            session.folder = SERVERS_ROOT.resolve(name);
+            session.pidFile = session.folder.resolve(SERVER_PID_FILENAME);
             session.info = new ServerInfo(name, new InetSocketAddress("127.0.0.1", port));
             session.connecting = true;
             session.leader = leader;
@@ -283,6 +392,7 @@ public class DynamicLoader {
 
             player.sendMessage(Component.text("🌍 Preparing your personal Earth...", NamedTextColor.AQUA));
             logger.info("[Session] Spawning dedicated server {} for leader {} (port {}, RCON {})", name, leader, port, rconPort);
+            recordSessionCreation(leader);
             executor.submit(() -> spawnAndConnectLeaderThenParty(player, session));
         }
     }
@@ -633,8 +743,10 @@ public class DynamicLoader {
     private ServerSession adoptWarmSession(UUID leader, Collection<UUID> members) {
         ServerSession warm = warmPool.poll();
         if (warm == null) {
+            requestWarmTopUp();
             return null;
         }
+        requestWarmTopUp();
 
         String oldName = warm.name;
         String newName = "voxelearth-" + leader.toString().substring(0, 8);
@@ -718,7 +830,8 @@ public class DynamicLoader {
         session.port = 30070 + ThreadLocalRandom.current().nextInt(1000);
         session.rconPort = session.port + 10;
         session.rconPass = generateRconPassword();
-        session.folder = Paths.get("servers", session.name);
+        session.folder = SERVERS_ROOT.resolve(session.name);
+        session.pidFile = session.folder.resolve(SERVER_PID_FILENAME);
         session.info = new ServerInfo(session.name, new InetSocketAddress("127.0.0.1", session.port));
         session.connecting = true;
 
@@ -739,14 +852,15 @@ public class DynamicLoader {
             }
             try {
                 ProcessBuilder pb = new ProcessBuilder(
-                        "python3", spawner.toString(),
+                        pythonExecutable, spawner.toString(),
                         "warm",
                         String.valueOf(session.port),
                         "--rcon-port", String.valueOf(session.rconPort),
                         "--rcon-pass", session.rconPass,
                         "--template", template.toString(),
                         "--base-dir", baseDir.toString(),
-                        "--empty-world"
+                        "--empty-world",
+                        "--server-name", session.name
                 );
                 pb.directory(workdir.toFile());
                 pb.redirectErrorStream(true);
@@ -754,6 +868,13 @@ public class DynamicLoader {
                 pb.environment().put("PYTHONUNBUFFERED", "1");
 
                 session.process = pb.start();
+
+                if (!captureServerPid(session, spawnLog, Duration.ofSeconds(90))) {
+                    logger.warn("[Warm] PID capture failed for {}; see {}", session.name, spawnLog);
+                    killProcess(session.process, 0, 500);
+                    cleanupSession(null, session);
+                    return;
+                }
 
                 if (shuttingDown.get()) {
                     logger.info("[Warm] Shutdown triggered; terminating {}", session.name);
@@ -825,6 +946,50 @@ public class DynamicLoader {
         });
 
         return session;
+    }
+
+    private boolean captureServerPid(ServerSession session, Path spawnLog, Duration timeout) {
+        if (session == null) {
+            return false;
+        }
+        Path pidFile = session.pidFile != null ? session.pidFile : session.folder != null
+                ? session.folder.resolve(SERVER_PID_FILENAME) : null;
+        if (pidFile == null) {
+            return false;
+        }
+        session.pidFile = pidFile;
+
+        long deadline = System.nanoTime() + timeout.toNanos();
+        boolean warned = false;
+        while (System.nanoTime() < deadline && !shuttingDown.get()) {
+            if (Files.exists(pidFile)) {
+                try {
+                    String raw = Files.readString(pidFile, StandardCharsets.UTF_8).trim();
+                    long pid = Long.parseLong(raw);
+                    session.serverPid = pid;
+                    try {
+                        session.serverHandle = ProcessHandle.of(pid).orElse(null);
+                    } catch (Exception ignored) {
+                        session.serverHandle = null;
+                    }
+                    logger.info("[Spawn] {} reported Java PID {}", session.name, pid);
+                    return true;
+                } catch (IOException | NumberFormatException ex) {
+                    if (!warned) {
+                        logger.warn("[Spawn] PID file {} unreadable for {} ({}); retrying", pidFile, session.name, ex.getMessage());
+                        warned = true;
+                    }
+                }
+            }
+            try {
+                Thread.sleep(250);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        logger.warn("[Spawn] Timed out waiting for PID file {} for {}. See {}", pidFile, session.name, spawnLog);
+        return false;
     }
 
 
@@ -1019,15 +1184,28 @@ public class DynamicLoader {
             return;
         }
         try {
-            ProcessBuilder pb = new ProcessBuilder("python3", "spawn_server.py",
+            Path workdir = Paths.get("").toAbsolutePath();
+            Path spawner = workdir.resolve("spawn_server.py");
+            Path spawnLog = workdir.resolve("spawn_server.log");
+
+            ProcessBuilder pb = new ProcessBuilder(pythonExecutable, spawner.toString(),
                     session.leader.toString(),
                     String.valueOf(session.port),
                     "--rcon-port", String.valueOf(session.rconPort),
-                    "--rcon-pass", session.rconPass
+                    "--rcon-pass", session.rconPass,
+                    "--server-name", session.name
             );
             pb.redirectErrorStream(true);
-            pb.directory(new File("."));
+            pb.redirectOutput(ProcessBuilder.Redirect.appendTo(spawnLog.toFile()));
+            pb.directory(workdir.toFile());
             session.process = pb.start();
+
+            if (!captureServerPid(session, spawnLog, Duration.ofSeconds(90))) {
+                logger.warn("[Session] PID capture failed for {}. See {}", session.name, spawnLog);
+                killProcess(session.process, 0, 500);
+                cleanupSession(null, session);
+                return;
+            }
 
             if (shuttingDown.get()) {
                 logger.info("[Session] Shutdown triggered; terminating {}", session.name);
@@ -1043,6 +1221,7 @@ public class DynamicLoader {
                 return;
             }
             if (!connectLeader(leaderPlayer, session, true)) {
+                clearSessionCooldown(session.leader);
                 return;
             }
 
@@ -1052,6 +1231,7 @@ public class DynamicLoader {
         } catch (Exception e) {
             logger.error("Failed to spawn dynamic server for {}", leaderPlayer.getUsername(), e);
             leaderPlayer.sendMessage(Component.text("❌ Error while creating your world.", NamedTextColor.RED));
+            clearSessionCooldown(session.leader);
             cleanupSession(leaderPlayer, session);
         }
     }
@@ -1063,15 +1243,28 @@ public class DynamicLoader {
             return;
         }
         try {
-            ProcessBuilder pb = new ProcessBuilder("python3", "spawn_server.py",
+            Path workdir = Paths.get("").toAbsolutePath();
+            Path spawner = workdir.resolve("spawn_server.py");
+            Path spawnLog = workdir.resolve("spawn_server.log");
+
+            ProcessBuilder pb = new ProcessBuilder(pythonExecutable, spawner.toString(),
                     session.leader.toString(),
                     String.valueOf(session.port),
                     "--rcon-port", String.valueOf(session.rconPort),
-                    "--rcon-pass", session.rconPass
+                    "--rcon-pass", session.rconPass,
+                    "--server-name", session.name
             );
             pb.redirectErrorStream(true);
-            pb.directory(new File("."));
+            pb.redirectOutput(ProcessBuilder.Redirect.appendTo(spawnLog.toFile()));
+            pb.directory(workdir.toFile());
             session.process = pb.start();
+
+            if (!captureServerPid(session, spawnLog, Duration.ofSeconds(90))) {
+                logger.warn("[Session] PID capture failed for {}. See {}", session.name, spawnLog);
+                killProcess(session.process, 0, 500);
+                cleanupSession(null, session);
+                return;
+            }
 
             if (shuttingDown.get()) {
                 logger.info("[Session] Shutdown triggered; terminating {}", session.name);
@@ -1088,6 +1281,7 @@ public class DynamicLoader {
             }
 
             if (!connectLeader(leaderPlayer, session, false)) {
+                clearSessionCooldown(session.leader);
                 return;
             }
 
@@ -1098,6 +1292,7 @@ public class DynamicLoader {
         } catch (Exception e) {
             logger.error("Spawn/connect failed for {}", leaderPlayer.getUsername(), e);
             leaderPlayer.sendMessage(Component.text("❌ Error while creating your world.", NamedTextColor.RED));
+            clearSessionCooldown(session.leader);
             cleanupSession(leaderPlayer, session);
         }
     }
@@ -1435,6 +1630,51 @@ public class DynamicLoader {
         }
     }
 
+    private void terminateServerProcess(ServerSession session) {
+        if (session == null) {
+            return;
+        }
+        ProcessHandle handle = session.serverHandle;
+        if ((handle == null || !handle.isAlive()) && session.serverPid > 0) {
+            try {
+                handle = ProcessHandle.of(session.serverPid).orElse(null);
+                session.serverHandle = handle;
+            } catch (Exception ignored) {
+                handle = null;
+            }
+        }
+        if (handle == null || !handle.isAlive()) {
+            session.serverPid = -1L;
+            session.serverHandle = null;
+            return;
+        }
+
+        logger.info("[Process] Stopping Java server PID {} ({})", handle.pid(), session.name);
+        boolean terminated = false;
+        try {
+            handle.destroy();
+            handle.onExit().get(3, TimeUnit.SECONDS);
+            terminated = true;
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+        } catch (ExecutionException | TimeoutException ignored) {
+            logger.warn("[Process] Graceful stop timed out for {}; forcing", session.name);
+        }
+
+        if (!terminated) {
+            try {
+                handle.destroyForcibly();
+                handle.onExit().get(2, TimeUnit.SECONDS);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            } catch (Exception ignored) {
+            }
+        }
+
+        session.serverPid = -1L;
+        session.serverHandle = null;
+    }
+
     private void killProcess(Process process, long softMs, long hardMs) {
         if (process == null) {
             return;
@@ -1515,6 +1755,7 @@ public class DynamicLoader {
 
         try {
             session.connecting = false;
+            terminateServerProcess(session);
             killProcess(session.process, 3_000, 4_000);
             safeUnregister(session.info);
             deleteTreeWithRetries(session.folder);
@@ -1536,6 +1777,9 @@ public class DynamicLoader {
             session.members.clear();
             platformInitialized.remove(session.name);
             warmPool.remove(session);
+            if (session.leader == null) {
+                requestWarmTopUp();
+            }
         }
     }
 
@@ -1577,10 +1821,11 @@ public class DynamicLoader {
         visitRadius.clear();
         moveRadius.clear();
         platformInitialized.clear();
+        nextSessionAllowed.clear();
     }
 
     private void clearServersDirectory() {
-        Path root = Paths.get("servers");
+        Path root = SERVERS_ROOT;
         if (!Files.exists(root)) {
             return;
         }

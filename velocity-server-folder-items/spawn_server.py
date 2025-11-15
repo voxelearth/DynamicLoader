@@ -5,6 +5,7 @@ import tempfile, time  # tempfile/time kept in case you want to reuse later
 WORLD_DIRS = {"world", "world_nether", "world_the_end"}
 HERE = pathlib.Path(__file__).resolve().parent  # script dir
 CWD  = pathlib.Path().resolve()                 # process cwd
+PID_FILE_NAME = ".server-pid"
 
 
 def setprop(lines, key, val):
@@ -57,6 +58,21 @@ def clear_worlds(dest_dir: pathlib.Path):
             shutil.rmtree(p, ignore_errors=True)
 
 
+def write_pid_file(path: pathlib.Path, pid: int):
+    """
+    Atomically persist the child PID so Velocity can always read it,
+    even on Windows where concurrent readers/writers can lock files.
+    """
+    tmp_path = path.with_name(path.name + ".tmp")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = f"{pid}\n"
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        fh.write(data)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp_path, path)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Spawn per-user Paper server by unzipping a template each time.")
     ap.add_argument("uuid", help="player UUID or 'warm'")
@@ -71,6 +87,7 @@ def main():
     ap.add_argument("--xms", default=None)
     ap.add_argument("--xmx", default=None)
     ap.add_argument("--empty-world", action="store_true", help="start with no world folders; Paper generates fresh")
+    ap.add_argument("--server-name", default=None, help="explicit folder name under servers/")
     args = ap.parse_args()
 
     # Resolve everything to absolute paths
@@ -79,8 +96,12 @@ def main():
 
     uuid = args.uuid
     port = int(args.port)
-    server_name = uuid[:8] if uuid != "warm" else f"warm-{os.getpid():x}"
-    folder = (servers_root / f"voxelearth-{server_name}").resolve()
+    if args.server_name:
+        folder_name = args.server_name
+    else:
+        suffix = uuid[:8] if uuid != "warm" else f"warm-{os.getpid():x}"
+        folder_name = f"voxelearth-{suffix}"
+    folder = (servers_root / folder_name).resolve()
 
     print(f"[=] CWD     : {CWD}")
     print(f"[=] Template: {template}")
@@ -183,7 +204,14 @@ def main():
 
     print(f"[*] Launching Paper: {' '.join(java_cmd)}  (cwd={folder})")
     with open(log_path, "ab", buffering=0) as logf:
-        subprocess.Popen(java_cmd, cwd=str(folder), stdout=logf, stderr=subprocess.STDOUT)
+        proc = subprocess.Popen(java_cmd, cwd=str(folder), stdout=logf, stderr=subprocess.STDOUT)
+
+    pid_path = folder / PID_FILE_NAME
+    try:
+        write_pid_file(pid_path, proc.pid)
+        print(f"[OK] Wrote Java PID {proc.pid} to {pid_path}")
+    except Exception as exc:
+        print(f"[!] Unable to write PID file {pid_path}: {exc}", file=sys.stderr)
 
     msg = f"Spawned {folder} via {mode} on port {port}"
     if args.rcon_port is not None and args.rcon_pass:

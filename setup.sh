@@ -1,12 +1,27 @@
 #!/bin/bash
 set -e
 
+# Allow CI/Docker to auto-accept prompts when AUTO_CONFIRM=1
+AUTO_CONFIRM="${AUTO_CONFIRM:-0}"
+
 # Run apt-get as root when needed
-SUDO=""; [ "$EUID" -ne 0 ] && SUDO="sudo"
+SUDO=""
+if [ "$EUID" -ne 0 ]; then
+  if command -v sudo >/dev/null 2>&1; then
+    SUDO="sudo"
+  else
+    echo "[!] Script must run as root or have sudo installed."
+    exit 1
+  fi
+fi
 
 confirm() {
   # Usage: confirm "[?] message [Y/n]"
   local prompt="${1:-Proceed? [Y/n]}"; local ans
+  if [ "$AUTO_CONFIRM" = "1" ]; then
+    echo "$prompt (auto-yes)"
+    return 0
+  fi
   if [ -t 0 ]; then
     read -r -p "$prompt " ans
     [[ -z "$ans" || "$ans" =~ ^[Yy]$ ]]
@@ -17,14 +32,18 @@ confirm() {
 }
 
 # --- Kill any processes using ports 25565 or 25566 ---
-echo "[*] Checking and freeing ports 25565 and 25566..."
-for port in 25565 25566; do
-  pid=$(sudo lsof -ti:$port || true)
-  if [ -n "$pid" ]; then
-    echo "    Killing process on port $port (PID $pid)..."
-    sudo kill -9 $pid || true
-  fi
-done
+if command -v lsof >/dev/null 2>&1; then
+  echo "[*] Checking and freeing ports 25565 and 25566..."
+  for port in 25565 25566; do
+    pid=$($SUDO lsof -ti:$port || true)
+    if [ -n "$pid" ]; then
+      echo "    Killing process on port $port (PID $pid)..."
+      $SUDO kill -9 $pid || true
+    fi
+  done
+else
+  echo "[*] lsof not found; skipping port cleanup."
+fi
 
 # --- Ensure JDK is installed (21+ required for Velocity) ---
 check_jdk() {
@@ -202,12 +221,17 @@ cp "$FORWARD_SECRET" "$SPAWN_SCRIPT" "$ZIP_PATH" "$SERVER_ICON" "$VELOCITY_TOML"
 # --- Add our build/libs/DynamicLoader*.jar to Velocity plugins ---
 # --- if it exists, otherwise, build it first. ---
 DYNAMIC_LOADER_JAR_PATTERN="DynamicLoader*.jar"
-DYNAMIC_LOADER_JAR_PATH=$(find "$ROOT_DIR/build/libs" -type f -name "$DYNAMIC_LOADER_JAR_PATTERN" | head -n 1)
+if [ -d "$ROOT_DIR/build/libs" ]; then
+  DYNAMIC_LOADER_JAR_PATH=$(find "$ROOT_DIR/build/libs" -type f -name "$DYNAMIC_LOADER_JAR_PATTERN" 2>/dev/null | head -n 1)
+else
+  DYNAMIC_LOADER_JAR_PATH=""
+fi
 if [ -z "$DYNAMIC_LOADER_JAR_PATH" ]; then
     echo "[*] DynamicLoader jar not found, building project..."
     cd "$ROOT_DIR"
+    chmod +x ./gradlew
     ./gradlew build
-    DYNAMIC_LOADER_JAR_PATH=$(find "$ROOT_DIR/build/libs" -type f -name "$DYNAMIC_LOADER_JAR_PATTERN" | head -n 1)
+    DYNAMIC_LOADER_JAR_PATH=$(find "$ROOT_DIR/build/libs" -type f -name "$DYNAMIC_LOADER_JAR_PATTERN" 2>/dev/null | head -n 1)
     if [ -z "$DYNAMIC_LOADER_JAR_PATH" ]; then
         echo "Error: DynamicLoader jar still not found after build."
         exit 1
@@ -230,6 +254,11 @@ if [ -f "$PAPER_GLOBAL" ]; then
   echo "[*] Enabled Velocity support in $PAPER_GLOBAL"
 else
   echo "[!] paper-global.yml not found at $PAPER_GLOBAL"
+fi
+
+if [ "${SKIP_SERVER_START:-0}" = "1" ]; then
+  echo "[*] Setup complete (SKIP_SERVER_START=1). Skipping server launch steps."
+  exit 0
 fi
 
 # --- Ensure Windows has Java ---

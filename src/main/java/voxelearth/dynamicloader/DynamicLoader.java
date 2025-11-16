@@ -246,6 +246,9 @@ public class DynamicLoader {
                 iter.remove();
                 continue;
             }
+            if (warm.connecting || warm.serverPid <= 0) {
+                continue;
+            }
             if (!isServerProcessAlive(warm)) {
                 iter.remove();
                 runAsync(() -> cleanupSession(null, warm));
@@ -265,7 +268,10 @@ public class DynamicLoader {
             } catch (Exception ignored) {
             }
         }
-        return handle != null && handle.isAlive();
+        if (handle == null) {
+            return true;
+        }
+        return handle.isAlive();
     }
 
     private boolean protocolizeAvailable() {
@@ -616,15 +622,23 @@ public class DynamicLoader {
                 player.sendMessage(Component.text("Ask your party leader to start the world with /earth.", NamedTextColor.RED));
                 return;
             }
+            if (!canStartNewSession(leader)) {
+                long waitSeconds = secondsUntilNextSession(leader);
+                player.sendMessage(Component.text("Hold on — your previous Earth is still closing. Try again in " + waitSeconds + "s.", NamedTextColor.YELLOW));
+                return;
+            }
             Collection<UUID> members = partyMembersFor(leader);
             ServerSession warm = adoptWarmSession(leader, members);
             if (warm != null) {
-                player.sendMessage(Component.text("🌍 Connecting you to your personal Earth...", NamedTextColor.AQUA));
+                recordSessionCreation(leader);
+                player.sendMessage(Component.text("?? Connecting you to your personal Earth...", NamedTextColor.AQUA));
                 logger.info("[Session] Adopting warm server {} for /visit leader {}", warm.name, leader);
                 executor.submit(() -> {
                     if (connectLeader(player, warm, false)) {
                         scheduleBackendCommandAfterConnect(player, warm, playerCmd);
                         pullPartyMembers(warm);
+                    } else {
+                        clearSessionCooldown(leader);
                     }
                 });
                 return;
@@ -655,6 +669,7 @@ public class DynamicLoader {
 
             player.sendMessage(Component.text("🌍 Spinning up your personal Earth...", NamedTextColor.AQUA));
             logger.info("[Session] Spawning new server {} for /visit leader {} (port {}, RCON {})", name, leader, port, rconPort);
+            recordSessionCreation(leader);
             ServerSession finalSession = session;
             executor.submit(() -> spawnAndConnectThenRun(player, finalSession, playerCmd));
         } else {

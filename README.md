@@ -79,6 +79,18 @@ docker build -t dynamicloader https://github.com/voxelearth/dynamicloader.git
 docker run -it --rm -p 25565:25565 -p 25566:25566 dynamicloader
 ```
 
+#### Custom ports
+The container exposes Velocity on 25565 and the lobby Paper server on 25566 by default. Override them by passing environment variables (and mapping the corresponding host ports):
+
+```bash
+docker run -it --rm \
+  -e PROXY_PORT=30010 \
+  -e LOBBY_PORT=30011 \
+  -p 30010:30010 \
+  -p 30011:30011 \
+  dynamicloader
+```
+
 ### Just want a single Voxel Earth Paper server?
 The full DynamicLoader network is overkill if you only need one Paper instance with the Voxel Earth plugin preloaded. Use the upstream single-server project instead:
 

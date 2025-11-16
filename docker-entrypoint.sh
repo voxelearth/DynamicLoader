@@ -5,6 +5,9 @@ ROOT_DIR="/opt/dynamicloader"
 VELOCITY_DIR="$ROOT_DIR/velocity"
 SERVER_DIR="$VELOCITY_DIR/server"
 LOG_DIR="$ROOT_DIR/docker-logs"
+PROXY_PORT="${PROXY_PORT:-25565}"
+LOBBY_PORT="${LOBBY_PORT:-25566}"
+export PROXY_PORT LOBBY_PORT
 mkdir -p "$LOG_DIR"
 PAPER_LOG="$LOG_DIR/paper.log"
 VELOCITY_LOG="$LOG_DIR/velocity.log"
@@ -15,6 +18,47 @@ if [ ! -f "$VELOCITY_DIR/velocity.jar" ] || [ ! -f "$SERVER_DIR/paper.jar" ]; th
   echo "[Docker] Velocity or server files missing; running setup.sh ..."
   AUTO_CONFIRM=1 SKIP_SERVER_START=1 ./setup.sh
 fi
+
+configure_ports() {
+  local props="$SERVER_DIR/server.properties"
+  if [ -f "$props" ]; then
+    if grep -q '^server-port=' "$props"; then
+      sed -i "s/^server-port=.*/server-port=${LOBBY_PORT}/" "$props"
+    else
+      echo "server-port=${LOBBY_PORT}" >> "$props"
+    fi
+    if grep -q '^query.port=' "$props"; then
+      sed -i "s/^query.port=.*/query.port=${LOBBY_PORT}/" "$props"
+    fi
+  fi
+
+  local vtoml="$VELOCITY_DIR/velocity.toml"
+  if [ -f "$vtoml" ]; then
+    python3 - <<'PY'
+from pathlib import Path
+import os
+vtoml = Path(os.environ["VELOCITY_TOML"])
+proxy_port = os.environ["PROXY_PORT"]
+lobby_port = os.environ["LOBBY_PORT"]
+text = vtoml.read_text(encoding="utf-8").splitlines()
+def patch_line(line, prefix, value):
+    if line.startswith(prefix):
+        return f'{prefix}{value}"'
+    return line
+for i, line in enumerate(text):
+    if line.startswith("bind = "):
+        text[i] = f'bind = "0.0.0.0:{proxy_port}"'
+    elif line.strip().startswith('lobby = "'):
+        text[i] = f'lobby = "127.0.0.1:{lobby_port}"'
+    elif line.startswith("port = ") and "[query]" in text[max(0, i-5):i+1]:
+        text[i] = f"port = {proxy_port}"
+vtoml.write_text("\n".join(text) + "\n", encoding="utf-8")
+PY
+  fi
+  echo "[Docker] Proxy port set to ${PROXY_PORT}, lobby port ${LOBBY_PORT}"
+}
+export VELOCITY_TOML="$VELOCITY_DIR/velocity.toml"
+configure_ports
 
 PAPER_PID=""
 VELOCITY_PID=""

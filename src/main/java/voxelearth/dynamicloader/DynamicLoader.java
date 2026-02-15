@@ -117,7 +117,7 @@ public class DynamicLoader {
         }
         this.nav = new NavigatorUI(
                 List.of(
-                        new FamousPlace("Great Pyramids of Giza, Egypt",        "great pyramids of giza egypt"),
+                        new FamousPlace("Great Pyramids of Giza, Egypt",        "Great Pyramid of Giza"),
                         new FamousPlace("Eiffel Tower, Paris France",           "eiffel tower paris"),
                         new FamousPlace("Statue of Liberty, NYC USA",           "statue of liberty new york"),
                         new FamousPlace("Taj Mahal, Agra India",                "taj mahal agra"),

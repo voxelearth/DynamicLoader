@@ -38,3 +38,7 @@ run/
 
 .idea/
 /velocity
+
+# Python helper bytecode
+__pycache__/
+*.py[cod]

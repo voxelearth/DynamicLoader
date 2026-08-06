@@ -1,0 +1,27 @@
+services:
+  dynamicloader:
+    build:
+      context: .
+    image: dynamicloader
+    container_name: voxel-server
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 60s
+    environment:
+      PROXY_PORT: "${PROXY_PORT:-25565}"
+      LOBBY_PORT: "${LOBBY_PORT:-25566}"
+      SESSION_IDLE_TIMEOUT_SECONDS: "${SESSION_IDLE_TIMEOUT_SECONDS:-90}"
+      SESSION_CONNECT_TIMEOUT_SECONDS: "${SESSION_CONNECT_TIMEOUT_SECONDS:-180}"
+      WARM_POOL_BUFFER: "${WARM_POOL_BUFFER:-2}"
+      WARM_POOL_MAX: "${WARM_POOL_MAX:-8}"
+      INTERNAL_LOG_MAX_BYTES: "${INTERNAL_LOG_MAX_BYTES:-104857600}"
+    ports:
+      - "${PROXY_PORT:-25565}:${PROXY_PORT:-25565}"
+      - "${LOBBY_PORT:-25566}:${LOBBY_PORT:-25566}"
+    tmpfs:
+      - /tmp:rw,exec,size=536870912,mode=1777
+    logging:
+      driver: local
+      options:
+        max-size: 20m
+        max-file: "5"

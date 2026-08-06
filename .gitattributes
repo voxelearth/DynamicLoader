@@ -1,2 +1,9 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# These files execute inside Linux containers even when the image is built
+# from a Windows checkout.
+*.sh text eol=lf
+*.py text eol=lf
+Dockerfile text eol=lf
+gradlew text eol=lf

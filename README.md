@@ -71,6 +71,33 @@ docker run -it --rm -p 25565:25565 -p 25566:25566 dynamicloader
 
 The image runs `setup.sh` during build, then launches both the lobby Paper server and the Velocity proxy when you `docker run` it. Any edits you make locally are picked up on the next `docker build`.
 
+For a long-running host, use Compose so temporary files and Docker logs stay bounded:
+
+```bash
+docker compose up -d --build
+```
+
+The Compose service uses Docker's rotating `local` log driver, keeps container `/tmp`
+in a bounded tmpfs, and gives each dynamic Paper server its own temporary directory.
+Session directories are removed when the last player leaves, after an idle grace period,
+and again at startup after an unclean host/container stop. The main tuning variables are:
+
+- `SESSION_IDLE_TIMEOUT_SECONDS` (default `90`)
+- `SESSION_CONNECT_TIMEOUT_SECONDS` (default `180`)
+- `WARM_POOL_BUFFER` (default `2`)
+- `WARM_POOL_MAX` (default `8`)
+- `INTERNAL_LOG_MAX_BYTES` (default `104857600`)
+
+Windows Docker Desktop hosts can install the weekly, low-free-space maintenance task
+from an elevated PowerShell prompt:
+
+```powershell
+.\ops\windows\install-disk-maintenance-task.ps1
+```
+
+The task keeps tagged images and volumes, bounds old build cache, runs ext4 trim, and
+only takes Docker Desktop offline to compact its VHDX when `C:` has less than 75 GB free.
+
 ### Build straight from GitHub
 If you prefer to skip cloning altogether, let Docker pull the repo as the build context:
 

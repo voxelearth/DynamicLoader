@@ -30,7 +30,6 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
-import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
@@ -73,16 +72,20 @@ public class DynamicLoader {
 
     private final PartyManager parties;
     private final Set<String> platformInitialized = ConcurrentHashMap.newKeySet();
+    private final Set<Path> pendingDeletes = ConcurrentHashMap.newKeySet();
     private final Deque<ServerSession> warmPool = new ConcurrentLinkedDeque<>();
     private final ScheduledExecutorService warmKeeper = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "DynamicLoader-warm");
         t.setDaemon(true);
         return t;
     });
-    private static final int WARM_BUFFER = 2;
+    private static final int WARM_BUFFER = envInt("WARM_POOL_BUFFER", 2, 0, 8);
+    private static final int WARM_MAX = envInt("WARM_POOL_MAX", 8, 0, 32);
     private static final Path SERVERS_ROOT = Paths.get("servers");
     private static final String SERVER_PID_FILENAME = ".server-pid";
     private static final long SESSION_COOLDOWN_MS = TimeUnit.SECONDS.toMillis(45);
+    private static final long SESSION_IDLE_TIMEOUT_MS = envSeconds("SESSION_IDLE_TIMEOUT_SECONDS", 90, 15);
+    private static final long SESSION_CONNECT_TIMEOUT_MS = envSeconds("SESSION_CONNECT_TIMEOUT_SECONDS", 180, 60);
     private final AtomicBoolean shuttingDown = new AtomicBoolean(false);
     private final String pythonExecutable;
 
@@ -106,6 +109,31 @@ public class DynamicLoader {
         proxy.getCommandManager().register("moveradiusother", new MoveRadiusOtherCommand());
         proxy.getCommandManager().register("moveload", new MoveLoadCommand());
         proxy.getCommandManager().register("moveloadother", new MoveLoadOtherCommand());
+    }
+
+    private static int envInt(String name, int defaultValue, int min, int max) {
+        String raw = System.getenv(name);
+        if (raw == null || raw.isBlank()) {
+            return defaultValue;
+        }
+        try {
+            return Math.max(min, Math.min(max, Integer.parseInt(raw.trim())));
+        } catch (NumberFormatException ignored) {
+            return defaultValue;
+        }
+    }
+
+    private static long envSeconds(String name, long defaultSeconds, long minSeconds) {
+        String raw = System.getenv(name);
+        long seconds = defaultSeconds;
+        if (raw != null && !raw.isBlank()) {
+            try {
+                seconds = Long.parseLong(raw.trim());
+            } catch (NumberFormatException ignored) {
+                seconds = defaultSeconds;
+            }
+        }
+        return TimeUnit.SECONDS.toMillis(Math.max(minSeconds, seconds));
     }
 
     /** Initialize Protocolize-driven UI after the proxy + dependencies are ready. */
@@ -168,7 +196,12 @@ public class DynamicLoader {
         this.nav.installHooks(); // register onConstruct/onInteract
         logger.info("Navigator UI initialized.");
 
+        // A container/host crash cannot deliver ProxyShutdownEvent. No per-session
+        // process can survive a container restart, so remove any directories left
+        // by an unclean stop before the warm pool starts recreating servers.
+        clearServersDirectory();
         warmKeeper.scheduleAtFixedRate(this::safeMaintainWarmPool, 0, 10, TimeUnit.SECONDS);
+        warmKeeper.scheduleAtFixedRate(this::safeReapIdleSessions, 15, 15, TimeUnit.SECONDS);
     }
 
     private void safeMaintainWarmPool() {
@@ -183,8 +216,9 @@ public class DynamicLoader {
     }
 
     private void maintainWarmPool() {
+        retryPendingDeletes();
         pruneDeadWarmServers();
-        int target = Math.min(8, proxy.getAllPlayers().size() + WARM_BUFFER);
+        int target = Math.min(WARM_MAX, proxy.getAllPlayers().size() + WARM_BUFFER);
         while (warmPool.size() < target) {
             ServerSession warm = spawnWarm();
             if (warm == null) {
@@ -268,10 +302,59 @@ public class DynamicLoader {
             } catch (Exception ignored) {
             }
         }
-        if (handle == null) {
-            return true;
+        return handle != null && handle.isAlive();
+    }
+
+    private void safeReapIdleSessions() {
+        if (shuttingDown.get()) {
+            return;
         }
-        return handle.isAlive();
+        try {
+            reapIdleSessions();
+            retryPendingDeletes();
+        } catch (Throwable t) {
+            logger.warn("Session janitor failed", t);
+        }
+    }
+
+    private void reapIdleSessions() {
+        long now = System.currentTimeMillis();
+        Set<ServerSession> sessions = new HashSet<>(sessionsByLeader.values());
+        for (ServerSession session : sessions) {
+            if (session == null || session.cleaned.get()) {
+                continue;
+            }
+            if (session.connecting) {
+                if (now - session.createdAtMs >= SESSION_CONNECT_TIMEOUT_MS) {
+                    logger.warn("[Janitor] {} has been connecting too long; cleaning it up", session.name);
+                    if (session.leader != null) {
+                        sessionsByLeader.remove(session.leader, session);
+                    }
+                    runAsync(() -> cleanupSession(null, session));
+                }
+                continue;
+            }
+            if (hasPlayerConnectedTo(session)) {
+                session.lastActivityAtMs = now;
+                continue;
+            }
+            if (now - session.lastActivityAtMs >= SESSION_IDLE_TIMEOUT_MS) {
+                logger.info("[Janitor] {} has no connected players; cleaning it up", session.name);
+                if (session.leader != null) {
+                    sessionsByLeader.remove(session.leader, session);
+                }
+                runAsync(() -> cleanupSession(null, session));
+            }
+        }
+    }
+
+    private boolean hasPlayerConnectedTo(ServerSession session) {
+        if (session == null || session.name == null) {
+            return false;
+        }
+        return proxy.getAllPlayers().stream().anyMatch(player -> player.getCurrentServer()
+                .map(connection -> connection.getServerInfo().getName().equalsIgnoreCase(session.name))
+                .orElse(false));
     }
 
     private boolean protocolizeAvailable() {
@@ -305,6 +388,8 @@ public class DynamicLoader {
         UUID leader;
         final Set<UUID> members = ConcurrentHashMap.newKeySet(); // includes leader
         final AtomicBoolean cleaned = new AtomicBoolean(false);
+        final long createdAtMs = System.currentTimeMillis();
+        volatile long lastActivityAtMs = createdAtMs;
         volatile long serverPid = -1L;
         volatile ProcessHandle serverHandle;
     }
@@ -775,6 +860,7 @@ public class DynamicLoader {
         warm.name = newName;
         warm.info = alias;
         warm.leader = leader;
+        warm.lastActivityAtMs = System.currentTimeMillis();
         warm.members.clear();
         warm.members.addAll(members);
 
@@ -1547,11 +1633,21 @@ public class DynamicLoader {
     public void onServerConnected(ServerConnectedEvent event) {
         Player player = event.getPlayer();
         String serverName = event.getServer().getServerInfo().getName();
+        long now = System.currentTimeMillis();
 
         // (Re)give the client-side Navigator item (slot 9) with retries to beat backend inventory sync
         if (nav != null) nav.giveWithRetries(player);
 
         if (serverName.equalsIgnoreCase(LOBBY_NAME)) {
+            UUID leader = leaderOfMember.get(player.getUniqueId());
+            if (leader != null) {
+                ServerSession session = sessionsByLeader.get(leader);
+                if (session != null) {
+                    // Start the empty-session grace period when a player leaves their
+                    // dynamic backend but remains online in the lobby.
+                    session.lastActivityAtMs = now;
+                }
+            }
             player.sendMessage(
                     Component.text("🌎 Welcome to ", NamedTextColor.GOLD)
                             .append(Component.text("Voxel Earth", NamedTextColor.AQUA))
@@ -1572,10 +1668,13 @@ public class DynamicLoader {
             sessionsByLeader.values().stream()
                     .filter(s -> s.name.equalsIgnoreCase(serverName))
                     .findFirst()
-                    .ifPresent(s -> executor.submit(() -> {
-                        try { Thread.sleep(300); } catch (InterruptedException ignored) {}
-                        ensurePlayerSupported(s, player.getUsername());
-                    }));
+                    .ifPresent(s -> {
+                        s.lastActivityAtMs = now;
+                        executor.submit(() -> {
+                            try { Thread.sleep(300); } catch (InterruptedException ignored) {}
+                            ensurePlayerSupported(s, player.getUsername());
+                        });
+                    });
 
             player.sendMessage(
                     Component.text("🌍 Welcome to your ", NamedTextColor.GOLD)
@@ -1598,13 +1697,24 @@ public class DynamicLoader {
         UUID leader = leaderOfMember.getOrDefault(playerId, playerId);
         ServerSession session = sessionsByLeader.get(leader);
         if (session == null) return;
+        session.lastActivityAtMs = System.currentTimeMillis();
 
-        boolean someoneOnline = session.members.stream().anyMatch(id -> proxy.getPlayer(id).isPresent());
-        if (!someoneOnline) {
-            logger.info("Cleaning up dynamic server for party leader {}", leader);
-            sessionsByLeader.remove(leader);
-            runAsync(() -> cleanupSession(player, session));
-        }
+        // DisconnectEvent can fire before Velocity has removed the player from its
+        // connection registry. Let that state settle, then decide based on who is
+        // actually connected to this backend (not merely online in the lobby).
+        runAsync(() -> {
+            try {
+                Thread.sleep(2_000);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            if (sessionsByLeader.get(leader) == session && !hasPlayerConnectedTo(session)) {
+                logger.info("Cleaning up empty dynamic server for party leader {}", leader);
+                sessionsByLeader.remove(leader, session);
+                cleanupSession(player, session);
+            }
+        });
     }
 
     @Subscribe
@@ -1664,30 +1774,54 @@ public class DynamicLoader {
             return;
         }
 
-        logger.info("[Process] Stopping Java server PID {} ({})", handle.pid(), session.name);
-        boolean terminated = false;
-        try {
-            handle.destroy();
-            handle.onExit().get(3, TimeUnit.SECONDS);
-            terminated = true;
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-        } catch (ExecutionException | TimeoutException ignored) {
-            logger.warn("[Process] Graceful stop timed out for {}; forcing", session.name);
-        }
+        logger.info("[Process] Stopping server process tree rooted at PID {} ({})", handle.pid(), session.name);
+        List<ProcessHandle> tree = new ArrayList<>(handle.descendants().toList());
+        Collections.reverse(tree);
+        tree.add(handle);
 
-        if (!terminated) {
-            try {
-                handle.destroyForcibly();
-                handle.onExit().get(2, TimeUnit.SECONDS);
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-            } catch (Exception ignored) {
+        for (ProcessHandle process : tree) {
+            if (process.isAlive()) {
+                try {
+                    process.destroy();
+                } catch (Throwable ignored) {
+                }
             }
+        }
+        waitForProcessTree(tree, 3_000);
+
+        boolean forced = false;
+        for (ProcessHandle process : tree) {
+            if (process.isAlive()) {
+                forced = true;
+                try {
+                    process.destroyForcibly();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+        if (forced) {
+            logger.warn("[Process] Graceful stop timed out for {}; forced remaining processes", session.name);
+            waitForProcessTree(tree, 2_000);
         }
 
         session.serverPid = -1L;
         session.serverHandle = null;
+    }
+
+    private void waitForProcessTree(Collection<ProcessHandle> processes, long timeoutMs) {
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+        while (System.nanoTime() < deadline) {
+            boolean anyAlive = processes.stream().anyMatch(ProcessHandle::isAlive);
+            if (!anyAlive) {
+                return;
+            }
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
     }
 
     private void killProcess(Process process, long softMs, long hardMs) {
@@ -1707,15 +1841,15 @@ public class DynamicLoader {
         }
     }
 
-    private void deleteTreeWithRetries(Path root) {
+    private boolean deleteTreeWithRetries(Path root) {
         if (root == null) {
-            return;
+            return true;
         }
         final int maxTries = 5;
         for (int attempt = 1; attempt <= maxTries; attempt++) {
             try {
                 if (!Files.exists(root)) {
-                    return;
+                    return true;
                 }
                 Files.walkFileTree(root, new SimpleFileVisitor<>() {
                     @Override
@@ -1731,7 +1865,7 @@ public class DynamicLoader {
                     }
                 });
                 if (!Files.exists(root)) {
-                    return;
+                    return true;
                 }
             } catch (IOException ignored) {
             }
@@ -1739,10 +1873,29 @@ public class DynamicLoader {
                 Thread.sleep(200L * attempt);
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
-                return;
+                return !Files.exists(root);
             }
         }
         logger.warn("Leftovers remain under {}", root);
+        return !Files.exists(root);
+    }
+
+    private void retryPendingDeletes() {
+        for (Path path : new ArrayList<>(pendingDeletes)) {
+            // A recently failed deletion must never win a race with a newly
+            // created session that happens to reuse the same folder name.
+            boolean pathInUse = sessionsByLeader.values().stream()
+                    .anyMatch(session -> path.equals(session.folder) && !session.cleaned.get())
+                    || warmPool.stream()
+                    .anyMatch(session -> path.equals(session.folder) && !session.cleaned.get());
+            if (pathInUse) {
+                pendingDeletes.remove(path);
+                continue;
+            }
+            if (deleteTreeWithRetries(path)) {
+                pendingDeletes.remove(path);
+            }
+        }
     }
 
     private void runAsync(Runnable task) {
@@ -1773,7 +1926,13 @@ public class DynamicLoader {
             terminateServerProcess(session);
             killProcess(session.process, 3_000, 4_000);
             safeUnregister(session.info);
-            deleteTreeWithRetries(session.folder);
+            if (session.folder != null) {
+                if (!deleteTreeWithRetries(session.folder)) {
+                    pendingDeletes.add(session.folder);
+                } else {
+                    pendingDeletes.remove(session.folder);
+                }
+            }
         } catch (Throwable t) {
             logger.error("Error cleaning up server {}", session.name, t);
         } finally {
@@ -1848,8 +2007,13 @@ public class DynamicLoader {
         try (var stream = Files.list(root)) {
             stream.forEach(child -> {
                 try {
-                    deleteTreeWithRetries(child);
+                    if (!deleteTreeWithRetries(child)) {
+                        pendingDeletes.add(child);
+                    } else {
+                        pendingDeletes.remove(child);
+                    }
                 } catch (Throwable t) {
+                    pendingDeletes.add(child);
                     logger.warn("Leftover not fully deleted: {}", child);
                 }
             });

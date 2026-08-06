@@ -175,8 +175,17 @@ def main():
 
     # write a per-server log so you can inspect boot
     log_path = folder / "server.log"
+    # The child process changes cwd to ``folder`` below, so pass Java and
+    # native libraries an absolute temp path rather than resolving the same
+    # relative session path a second time underneath that cwd.
+    runtime_tmp = (folder / ".runtime-tmp").resolve()
+    runtime_tmp.mkdir(parents=True, exist_ok=True)
 
-    java_cmd = [args.java]
+    # Java libraries used by Paper/VoxelEarth unpack native sqlite, jansi, LWJGL,
+    # and image helpers into java.io.tmpdir. Keeping that directory inside the
+    # session folder makes normal session deletion reclaim those files instead
+    # of leaking one uniquely named copy into the container-wide /tmp forever.
+    java_cmd = [args.java, f"-Djava.io.tmpdir={runtime_tmp}"]
     if args.xms:
         java_cmd.append(f"-Xms{args.xms}")
     if args.xmx:
@@ -203,8 +212,17 @@ def main():
     ]
 
     print(f"[*] Launching Paper: {' '.join(java_cmd)}  (cwd={folder})")
+    proc_env = os.environ.copy()
+    for key in ("TMPDIR", "TMP", "TEMP"):
+        proc_env[key] = str(runtime_tmp)
     with open(log_path, "ab", buffering=0) as logf:
-        proc = subprocess.Popen(java_cmd, cwd=str(folder), stdout=logf, stderr=subprocess.STDOUT)
+        proc = subprocess.Popen(
+            java_cmd,
+            cwd=str(folder),
+            env=proc_env,
+            stdout=logf,
+            stderr=subprocess.STDOUT,
+        )
 
     pid_path = folder / PID_FILE_NAME
     try:

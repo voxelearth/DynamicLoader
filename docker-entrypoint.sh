@@ -5,13 +5,36 @@ ROOT_DIR="/opt/dynamicloader"
 VELOCITY_DIR="$ROOT_DIR/velocity"
 SERVER_DIR="$VELOCITY_DIR/server"
 LOG_DIR="$ROOT_DIR/docker-logs"
+SESSIONS_DIR="$VELOCITY_DIR/servers"
 PROXY_PORT="${PROXY_PORT:-25565}"
 LOBBY_PORT="${LOBBY_PORT:-25566}"
+INTERNAL_LOG_MAX_BYTES="${INTERNAL_LOG_MAX_BYTES:-104857600}"
 export PROXY_PORT LOBBY_PORT
 mkdir -p "$LOG_DIR"
 PAPER_LOG="$LOG_DIR/paper.log"
 VELOCITY_LOG="$LOG_DIR/velocity.log"
-touch "$PAPER_LOG" "$VELOCITY_LOG"
+
+cleanup_stale_runtime() {
+  # Session processes cannot survive a container restart. Remove directories
+  # left by a hard host/container stop before Velocity starts a new warm pool.
+  if [ -d "$SESSIONS_DIR" ]; then
+    find "$SESSIONS_DIR" -mindepth 1 -maxdepth 1 -xdev -exec rm -rf -- {} +
+  fi
+  mkdir -p "$SESSIONS_DIR"
+
+  # /tmp is private, disposable container state. Older images allowed every
+  # Paper process to leave uniquely named native-library files here.
+  if [ -d /tmp ]; then
+    find /tmp -mindepth 1 -maxdepth 1 -xdev -exec rm -rf -- {} +
+  fi
+
+  # Docker's logging driver is the durable, bounded log sink. These two files
+  # only multiplex the child processes into stdout, so start them clean.
+  : >"$PAPER_LOG"
+  : >"$VELOCITY_LOG"
+}
+
+cleanup_stale_runtime
 
 cd "$ROOT_DIR"
 if [ ! -f "$VELOCITY_DIR/velocity.jar" ] || [ ! -f "$SERVER_DIR/paper.jar" ]; then
@@ -63,6 +86,7 @@ configure_ports
 PAPER_PID=""
 VELOCITY_PID=""
 TAIL_PID=""
+LOG_JANITOR_PID=""
 
 start_paper() {
   echo "[Docker] Starting Paper lobby server..."
@@ -84,8 +108,25 @@ start_velocity() {
   echo "[Docker] Velocity PID $VELOCITY_PID"
 }
 
+start_log_janitor() {
+  (
+    while true; do
+      sleep 60
+      for log_file in "$PAPER_LOG" "$VELOCITY_LOG"; do
+        [ -f "$log_file" ] || continue
+        log_size="$(stat -c %s "$log_file" 2>/dev/null || echo 0)"
+        if [ "$log_size" -gt "$INTERNAL_LOG_MAX_BYTES" ] 2>/dev/null; then
+          : >"$log_file"
+          echo "[Docker] Truncated internal relay log $log_file at $log_size bytes"
+        fi
+      done
+    done
+  ) &
+  LOG_JANITOR_PID=$!
+}
+
 shutdown_children() {
-  for pid in "$TAIL_PID" "$PAPER_PID" "$VELOCITY_PID"; do
+  for pid in "$LOG_JANITOR_PID" "$TAIL_PID" "$PAPER_PID" "$VELOCITY_PID"; do
     if [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null; then
       kill "$pid" 2>/dev/null || true
     fi
@@ -98,6 +139,7 @@ handle_exit() {
   shutdown_children
   wait "$PAPER_PID" 2>/dev/null || true
   wait "$VELOCITY_PID" 2>/dev/null || true
+  wait "$LOG_JANITOR_PID" 2>/dev/null || true
   exit "$code"
 }
 
@@ -106,6 +148,7 @@ trap 'handle_exit 143' TERM
 
 start_paper
 start_velocity
+start_log_janitor
 
 tail -F "$PAPER_LOG" "$VELOCITY_LOG" &
 TAIL_PID=$!

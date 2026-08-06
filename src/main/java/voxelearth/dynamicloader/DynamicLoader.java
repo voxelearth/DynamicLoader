@@ -155,11 +155,11 @@ public class DynamicLoader {
                         new FamousPlace("Grand Canyon South Rim, USA",          "36.06165,-112.10795"),
                         new FamousPlace("Great Wall Mutianyu, China",           "40.43191,116.57037"),
                         new FamousPlace("Colosseum, Rome Italy",                "colosseum rome"),
-                        new FamousPlace("Machu Picchu, Peru",                   "machu picchu"),
+                        new FamousPlace("Machu Picchu, Peru",                   "-13.16320,-72.54526"),
                         new FamousPlace("Burj Khalifa, Dubai UAE",              "burj khalifa dubai"),
                         new FamousPlace("Golden Gate Bridge, San Francisco",    "golden gate bridge san francisco"),
                         new FamousPlace("Big Ben, London UK",                   "big ben london"),
-                        new FamousPlace("Niagara Falls, USA Canada",            "niagara falls"),
+                        new FamousPlace("Niagara Falls, USA Canada",            "43.07727,-79.07532"),
                         new FamousPlace("Santorini - Oia, Greece",              "oia santorini"),
                         new FamousPlace("Custom",                               ""),
                         new FamousPlace("Angkor Wat, Siem Reap Cambodia",       "angkor wat siem reap")
